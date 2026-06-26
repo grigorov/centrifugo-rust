@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod grpc;
 mod http;
+mod sockjs;
 mod ws;
 
 use std::sync::Arc;

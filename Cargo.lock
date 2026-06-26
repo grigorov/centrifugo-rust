@@ -322,6 +322,7 @@ dependencies = [
  "centrifugo-redis",
  "clap",
  "futures-util",
+ "parking_lot",
  "prost",
  "serde",
  "serde_json",

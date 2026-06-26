@@ -23,5 +23,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 futures-util = { workspace = true }
+parking_lot = { workspace = true }
 tonic = "0.12"
 prost = "0.13"
