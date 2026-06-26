@@ -10,14 +10,16 @@ use axum::{Extension, Json, Router};
 use centrifugo_core::Node;
 use serde_json::json;
 
+use crate::admin::{self, AdminConfig};
 use crate::api::{self, ApiAuth};
 use crate::sockjs::{self, Sessions};
 use crate::ws;
 
-pub fn router(node: Arc<Node>, api_auth: ApiAuth) -> Router {
+pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/admin/auth", post(admin::admin_auth))
         .route("/connection/websocket", get(ws::ws_handler))
         .route("/api", post(api::api_handler))
         // SockJS fallback transport (xhr-polling + /info).
@@ -34,6 +36,7 @@ pub fn router(node: Arc<Node>, api_auth: ApiAuth) -> Router {
             post(sockjs::xhr_send).options(sockjs::options),
         )
         .layer(Extension(api_auth))
+        .layer(Extension(admin_config))
         .layer(Extension(Sessions::default()))
         .with_state(node)
 }

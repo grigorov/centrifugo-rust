@@ -26,6 +26,9 @@ type Raw = Box<RawValue>;
 pub struct ApiAuth {
     pub key: String,
     pub insecure: bool,
+    /// Admin session secret; a valid `Bearer` admin token also authorizes the API
+    /// (empty disables admin-token auth).
+    pub admin_secret: String,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -133,7 +136,7 @@ pub async fn api_handler(
     RawQuery(query): RawQuery,
     body: String,
 ) -> Response {
-    if !auth.insecure && !authorized(&auth.key, &headers, query.as_deref()) {
+    if !auth.insecure && !authorized(&auth, &headers, query.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if body.trim().is_empty() {
@@ -158,27 +161,35 @@ pub async fn api_handler(
         .into_response()
 }
 
-/// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`.
-/// An empty configured key never authorizes (matches Go).
-fn authorized(key: &str, headers: &HeaderMap, query: Option<&str>) -> bool {
-    if key.is_empty() {
-        return false;
-    }
+/// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`,
+/// or a valid `Authorization: Bearer <admin-token>`. An empty configured api key
+/// never authorizes via apikey (matches Go).
+fn authorized(auth: &ApiAuth, headers: &HeaderMap, query: Option<&str>) -> bool {
     if let Some(h) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(s) = h.to_str() {
             let mut parts = s.split_whitespace();
             if let (Some(scheme), Some(val)) = (parts.next(), parts.next()) {
-                if scheme.eq_ignore_ascii_case("apikey") && val == key {
+                if scheme.eq_ignore_ascii_case("apikey")
+                    && !auth.key.is_empty()
+                    && val == auth.key
+                {
+                    return true;
+                }
+                if scheme.eq_ignore_ascii_case("bearer")
+                    && centrifugo_auth::verify_admin_token(&auth.admin_secret, val)
+                {
                     return true;
                 }
             }
         }
     }
-    if let Some(q) = query {
-        for pair in q.split('&') {
-            let mut it = pair.splitn(2, '=');
-            if it.next() == Some("api_key") && it.next() == Some(key) {
-                return true;
+    if !auth.key.is_empty() {
+        if let Some(q) = query {
+            for pair in q.split('&') {
+                let mut it = pair.splitn(2, '=');
+                if it.next() == Some("api_key") && it.next() == Some(auth.key.as_str()) {
+                    return true;
+                }
             }
         }
     }

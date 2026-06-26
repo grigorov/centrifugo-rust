@@ -111,6 +111,15 @@ pub struct ServeArgs {
     /// HTTP callback instead of a JWT.
     #[arg(long = "proxy_connect_endpoint", default_value = "")]
     pub proxy_connect_endpoint: String,
+    /// Enable the admin endpoints.
+    #[arg(long = "admin")]
+    pub admin: bool,
+    /// Admin password (for `POST /admin/auth`).
+    #[arg(long = "admin_password", default_value = "")]
+    pub admin_password: String,
+    /// Admin session token secret.
+    #[arg(long = "admin_secret", default_value = "")]
+    pub admin_secret: String,
     /// Engine backing pub/sub, history and presence: `memory` or `redis`.
     #[arg(long = "engine", default_value = "memory")]
     pub engine: String,

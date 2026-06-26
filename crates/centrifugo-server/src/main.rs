@@ -1,5 +1,6 @@
 //! Centrifugo (Rust) binary entrypoint.
 
+mod admin;
 mod api;
 mod cli;
 mod config;
@@ -153,6 +154,12 @@ async fn main() -> anyhow::Result<()> {
             let api_auth = api::ApiAuth {
                 key: settings.api_key.clone(),
                 insecure: settings.api_insecure,
+                admin_secret: settings.admin_secret.clone(),
+            };
+            let admin_config = admin::AdminConfig {
+                enabled: settings.admin,
+                password: settings.admin_password.clone(),
+                secret: settings.admin_secret.clone(),
             };
             let grpc = settings
                 .grpc_api
@@ -199,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
                 });
                 tracing::info!("gRPC API listening on {grpc_addr}");
             }
-            let app = http::router(Arc::clone(&node), api_auth);
+            let app = http::router(Arc::clone(&node), api_auth, admin_config);
             http::serve(addr, app).await
         }
     }

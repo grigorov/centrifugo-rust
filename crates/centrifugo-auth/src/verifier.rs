@@ -201,6 +201,33 @@ pub fn gen_connect_token(
     .map_err(|_| VerifyError::Invalid)
 }
 
+/// Sign an admin session token (HS256 over `admin_secret`), returned by
+/// `POST /admin/auth` after a correct password.
+pub fn gen_admin_token(admin_secret: &str) -> Result<String, VerifyError> {
+    encode(
+        &Header::new(Algorithm::HS256),
+        &serde_json::json!({"admin": true}),
+        &EncodingKey::from_secret(admin_secret.as_bytes()),
+    )
+    .map_err(|_| VerifyError::Invalid)
+}
+
+/// Verify an admin session token against `admin_secret`.
+pub fn verify_admin_token(admin_secret: &str, token: &str) -> bool {
+    if admin_secret.is_empty() {
+        return false;
+    }
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = false;
+    validation.required_spec_claims.clear();
+    decode::<serde_json::Value>(
+        token,
+        &DecodingKey::from_secret(admin_secret.as_bytes()),
+        &validation,
+    )
+    .is_ok()
+}
+
 /// exp/nbf validity (matches Go's ErrTokenExpired path; absent claims pass).
 fn check_expiry(exp: Option<i64>, nbf: Option<i64>) -> Result<(), VerifyError> {
     let now = now_unix();

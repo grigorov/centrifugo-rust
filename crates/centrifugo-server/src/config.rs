@@ -27,6 +27,9 @@ pub struct Settings {
     pub engine: String,
     pub redis_address: String,
     pub proxy_connect_endpoint: String,
+    pub admin: bool,
+    pub admin_password: String,
+    pub admin_secret: String,
     pub namespaces: Namespaces,
 }
 
@@ -103,6 +106,9 @@ impl Settings {
             engine: a.engine.clone(),
             redis_address: a.redis_address.clone(),
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
+            admin: a.admin,
+            admin_password: a.admin_password.clone(),
+            admin_secret: a.admin_secret.clone(),
             namespaces: Namespaces {
                 default: ChannelOptions {
                     presence: a.presence,
@@ -146,6 +152,9 @@ impl Settings {
             engine: fc.engine,
             redis_address: fc.redis_address,
             proxy_connect_endpoint: fc.proxy_connect_endpoint,
+            admin: fc.admin,
+            admin_password: fc.admin_password,
+            admin_secret: fc.admin_secret,
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -249,6 +258,12 @@ struct FileConfig {
     redis_address: String,
     #[serde(default)]
     proxy_connect_endpoint: String,
+    #[serde(default)]
+    admin: bool,
+    #[serde(default)]
+    admin_password: String,
+    #[serde(default)]
+    admin_secret: String,
     #[serde(flatten)]
     options: ChannelOptionsCfg,
     #[serde(default = "default_ns_boundary")]
