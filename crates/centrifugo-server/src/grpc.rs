@@ -93,24 +93,22 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::BroadcastRequest>,
     ) -> Result<Response<pb::BroadcastResponse>, Status> {
         let req = request.into_inner();
-        let body = |error| {
-            Ok(Response::new(pb::BroadcastResponse {
-                error,
-                result: None,
-            }))
+        let error = if req.channels.is_empty() || req.data.is_empty() {
+            Some(api_err(107, "bad request"))
+        } else {
+            req.channels
+                .iter()
+                .find_map(|ch| channel_caps(&self.node, ch).err())
         };
-        if req.channels.is_empty() || req.data.is_empty() {
-            return body(Some(api_err(107, "bad request")));
-        }
-        for ch in &req.channels {
-            if let Err(e) = channel_caps(&self.node, ch) {
-                return body(Some(e));
+        if error.is_none() {
+            for ch in &req.channels {
+                self.node.publish(ch, &req.data, None).await;
             }
         }
-        for ch in &req.channels {
-            self.node.publish(ch, &req.data, None).await;
-        }
-        body(None)
+        Ok(Response::new(pb::BroadcastResponse {
+            error,
+            result: None,
+        }))
     }
 
     async fn unsubscribe(
