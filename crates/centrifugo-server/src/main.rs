@@ -194,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
                 engine,
                 verifier,
                 settings.client_insecure,
+                settings.client_anonymous,
                 settings.namespaces,
                 connect_proxy,
             );

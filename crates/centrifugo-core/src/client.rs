@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::hub::{ClientHandle, ClientId, Out};
 use crate::node::Node;
-use crate::proxy::ProxyConnectRequest;
+use crate::proxy::{ProxyConnectOutcome, ProxyConnectRequest};
 
 /// Result of dispatching one command: replies to send, plus an optional
 /// disconnect that closes the connection (with a specific code + reason).
@@ -139,28 +139,23 @@ impl Client {
         // The client id is assigned before auth so a connect-proxy can receive it.
         self.id = Uuid::new_v4().to_string();
 
-        // Determine identity. Precedence: connect-proxy (when configured) →
-        // insecure (anonymous) → JWT.
-        let (user, info, expire_at) = if let Some(proxy) = self.node.connect_proxy() {
-            let preq = ProxyConnectRequest {
-                client: self.id.clone(),
-                transport: "websocket".into(),
-                protocol: match self.proto {
-                    ProtocolType::Json => "json".into(),
-                    ProtocolType::Protobuf => "protobuf".into(),
-                },
-                data: None,
-            };
-            match proxy.connect(preq).await {
-                Ok(reply) => (reply.user, reply.info, reply.expire_at),
-                // Proxy rejected or unreachable -> close the connection.
-                Err(_) => return CommandOutcome::disconnect(Disconnect::invalid_token()),
-            }
-        } else if self.node.client_insecure() {
-            (String::new(), None, 0)
-        } else if !req.token.is_empty() {
+        // Identity resolution mirrors centrifugo v2.8.6 OnClientConnecting:
+        //   1. A present token is verified FIRST (insecure only zeroes its
+        //      expiry, it does not skip verification).
+        //   2. Else, a configured connect-proxy authenticates.
+        //   3. Else, anonymous/insecure yields an empty-user connection.
+        //   4. Else, reject with DisconnectBadRequest (3003).
+        let creds: Option<(String, Option<Vec<u8>>, i64)> = if !req.token.is_empty() {
             match self.node.verifier().verify_connect_token(&req.token) {
-                Ok(ct) => (ct.user, ct.info, ct.expire_at),
+                Ok(ct) => {
+                    // Insecure mode keeps the token's user/info but forces no expiry.
+                    let expire_at = if self.node.client_insecure() {
+                        0
+                    } else {
+                        ct.expire_at
+                    };
+                    Some((ct.user, ct.info, expire_at))
+                }
                 // Expired connect token -> error reply (109).
                 Err(VerifyError::Expired) => {
                     return CommandOutcome::replies(vec![Reply::err(
@@ -173,9 +168,43 @@ impl Client {
                     return CommandOutcome::disconnect(Disconnect::invalid_token());
                 }
             }
+        } else if let Some(proxy) = self.node.connect_proxy() {
+            let preq = ProxyConnectRequest {
+                client: self.id.clone(),
+                transport: "websocket".into(),
+                protocol: match self.proto {
+                    ProtocolType::Json => "json".into(),
+                    ProtocolType::Protobuf => "protobuf".into(),
+                },
+                data: None,
+            };
+            match proxy.connect(preq).await {
+                Ok(ProxyConnectOutcome::Credentials(r)) => Some((r.user, r.info, r.expire_at)),
+                // Explicit proxy error -> relay that code/message as an error reply.
+                Ok(ProxyConnectOutcome::Error { code, message }) => {
+                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::new(code, message))]);
+                }
+                // Explicit proxy disconnect -> close with that code/reason.
+                Ok(ProxyConnectOutcome::Disconnect { code, reason }) => {
+                    return CommandOutcome::disconnect(Disconnect::new(code, reason, false));
+                }
+                // No credentials -> fall through to anonymous/insecure handling.
+                Ok(ProxyConnectOutcome::NoCredentials) => None,
+                // Transport failure -> ErrorInternal (100) reply, matching Go.
+                Err(_) => return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]),
+            }
         } else {
-            // No token and not insecure: reject the connection.
-            return CommandOutcome::disconnect(Disconnect::invalid_token());
+            None
+        };
+
+        // Anonymous/insecure fallback to an empty-user connection when no
+        // identity was established; otherwise reject.
+        let (user, info, expire_at) = match creds {
+            Some(c) => c,
+            None if self.node.client_anonymous() || self.node.client_insecure() => {
+                (String::new(), None, 0)
+            }
+            None => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
 
         self.user = user;
@@ -455,6 +484,11 @@ impl Client {
             Ok(r) => r,
             Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
+        // Go (centrifuge handleRefresh): an empty refresh token is rejected with
+        // DisconnectBadRequest (3003) before any verification.
+        if req.token.is_empty() {
+            return CommandOutcome::disconnect(Disconnect::bad_request());
+        }
         match self.node.verifier().verify_connect_token(&req.token) {
             Ok(ct) => {
                 if !ct.user.is_empty() {
@@ -462,23 +496,33 @@ impl Client {
                 }
                 self.conn_info = ct.info;
                 self.expire_at = ct.expire_at;
-                let (expires, ttl) = if ct.expire_at > 0 {
-                    (true, (ct.expire_at - now_unix()).max(0) as u32)
-                } else {
-                    (false, 0)
-                };
+                // Go: a *valid* token whose new expiry is already in the past
+                // (expire_at > 0 && ttl <= 0) yields ErrorExpired (110); a token
+                // with no expiry just refreshes successfully.
+                if ct.expire_at > 0 {
+                    let ttl = ct.expire_at - now_unix();
+                    if ttl <= 0 {
+                        return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::expired())]);
+                    }
+                    let result = RefreshResult {
+                        client: self.id.clone(),
+                        version: String::new(),
+                        expires: true,
+                        ttl: ttl as u32,
+                    };
+                    return CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)]);
+                }
                 let result = RefreshResult {
                     client: self.id.clone(),
                     version: String::new(),
-                    expires,
-                    ttl,
+                    expires: false,
+                    ttl: 0,
                 };
                 CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
             }
-            // Expired refresh token -> ErrorExpired (110).
-            Err(VerifyError::Expired) => {
-                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::expired())])
-            }
+            // Expired refresh token -> DisconnectExpired (3005), matching Go's
+            // RefreshReply{Expired:true} path (NOT a 110 error reply).
+            Err(VerifyError::Expired) => CommandOutcome::disconnect(Disconnect::expired()),
             // Invalid refresh token -> close (3002).
             Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
         }

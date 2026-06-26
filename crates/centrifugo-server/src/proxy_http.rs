@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use centrifugo_core::{ConnectProxy, ProxyConnectReply, ProxyConnectRequest};
+use centrifugo_core::{ConnectProxy, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
@@ -33,9 +33,25 @@ struct ProxyResponse {
     #[serde(default)]
     result: Option<ConnectResult>,
     #[serde(default)]
-    error: Option<serde_json::Value>,
+    error: Option<ProxyError>,
     #[serde(default)]
-    disconnect: Option<serde_json::Value>,
+    disconnect: Option<ProxyDisconnect>,
+}
+
+#[derive(Deserialize, Default)]
+struct ProxyError {
+    #[serde(default)]
+    code: u32,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Deserialize, Default)]
+struct ProxyDisconnect {
+    #[serde(default)]
+    code: u32,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -52,7 +68,7 @@ struct ConnectResult {
 
 #[async_trait]
 impl ConnectProxy for HttpConnectProxy {
-    async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectReply> {
+    async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectOutcome> {
         let body = serde_json::json!({
             "client": req.client,
             "transport": req.transport,
@@ -68,12 +84,23 @@ impl ConnectProxy for HttpConnectProxy {
             .error_for_status()?
             .json()
             .await?;
-        if resp.error.is_some() || resp.disconnect.is_some() {
-            anyhow::bail!("connect proxy denied the connection");
+        // Precedence matches Go's connect_handler: disconnect, then error, then
+        // result; absent all three -> no credentials (fall through to anon/insecure).
+        if let Some(d) = resp.disconnect {
+            return Ok(ProxyConnectOutcome::Disconnect {
+                code: d.code,
+                reason: d.reason,
+            });
         }
-        let result = resp
-            .result
-            .ok_or_else(|| anyhow::anyhow!("connect proxy returned no result"))?;
+        if let Some(e) = resp.error {
+            return Ok(ProxyConnectOutcome::Error {
+                code: e.code,
+                message: e.message,
+            });
+        }
+        let Some(result) = resp.result else {
+            return Ok(ProxyConnectOutcome::NoCredentials);
+        };
         // b64info (base64) overrides inline info, matching the token semantics.
         let info = match result.b64info {
             Some(ref b) if !b.is_empty() => {
@@ -81,10 +108,10 @@ impl ConnectProxy for HttpConnectProxy {
             }
             _ => result.info.map(|r| r.get().as_bytes().to_vec()),
         };
-        Ok(ProxyConnectReply {
+        Ok(ProxyConnectOutcome::Credentials(ProxyConnectReply {
             user: result.user,
             info,
             expire_at: result.expire_at,
-        })
+        }))
     }
 }

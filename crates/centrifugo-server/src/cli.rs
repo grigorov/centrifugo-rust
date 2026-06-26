@@ -62,6 +62,9 @@ pub struct ServeArgs {
     /// Allow connections without a token (anonymous), assigning a fresh client id.
     #[arg(long = "client_insecure")]
     pub client_insecure: bool,
+    /// Allow tokenless connections with an empty user id (Go `client_anonymous`).
+    #[arg(long = "client_anonymous")]
+    pub client_anonymous: bool,
     /// HMAC secret for HS256/384/512 connection tokens.
     #[arg(long = "token_hmac_secret_key", default_value = "")]
     pub token_hmac_secret_key: String,

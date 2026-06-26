@@ -25,9 +25,25 @@ pub struct ProxyConnectReply {
     pub expire_at: i64,
 }
 
-/// Authenticate a CONNECT via an external service. `Ok` accepts the connection
-/// with the returned identity; `Err` rejects it (the client is disconnected).
+/// What a connect-proxy decided, mirroring centrifugo's proxy connect_handler:
+/// the endpoint may grant credentials, relay an explicit error code, force a
+/// disconnect, or return no credentials (fall through to anonymous/insecure).
+pub enum ProxyConnectOutcome {
+    /// `result` present: accept with this identity.
+    Credentials(ProxyConnectReply),
+    /// `error` present: reply with this error code/message.
+    Error { code: u32, message: String },
+    /// `disconnect` present: close with this code/reason.
+    Disconnect { code: u32, reason: String },
+    /// No `result`/`error`/`disconnect`: no credentials established (the
+    /// connection then falls through to anonymous/insecure handling).
+    NoCredentials,
+}
+
+/// Authenticate a CONNECT via an external service. `Ok(outcome)` carries the
+/// proxy's decision; `Err` is a transport failure (mapped to ErrorInternal 100,
+/// matching Go's proxy connect_handler).
 #[async_trait]
 pub trait ConnectProxy: Send + Sync {
-    async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectReply>;
+    async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectOutcome>;
 }

@@ -15,6 +15,7 @@ pub struct Settings {
     pub address: String,
     pub port: u16,
     pub client_insecure: bool,
+    pub client_anonymous: bool,
     pub token_hmac_secret_key: String,
     pub token_rsa_public_key: String,
     pub token_ecdsa_public_key: String,
@@ -65,6 +66,9 @@ impl Settings {
         if !self.client_insecure && env("CLIENT_INSECURE").as_deref() == Some("true") {
             self.client_insecure = true;
         }
+        if !self.client_anonymous && env("CLIENT_ANONYMOUS").as_deref() == Some("true") {
+            self.client_anonymous = true;
+        }
         if !self.api_insecure && env("API_INSECURE").as_deref() == Some("true") {
             self.api_insecure = true;
         }
@@ -94,6 +98,7 @@ impl Settings {
             address: a.address.clone(),
             port: a.port,
             client_insecure: a.client_insecure,
+            client_anonymous: a.client_anonymous,
             token_hmac_secret_key: a.token_hmac_secret_key.clone(),
             token_rsa_public_key: a.token_rsa_public_key.clone(),
             token_ecdsa_public_key: a.token_ecdsa_public_key.clone(),
@@ -140,6 +145,7 @@ impl Settings {
             address: a.address.clone(),
             port: a.port,
             client_insecure: fc.client_insecure,
+            client_anonymous: fc.client_anonymous,
             token_hmac_secret_key: fc.token_hmac_secret_key,
             token_rsa_public_key: fc.token_rsa_public_key,
             token_ecdsa_public_key: fc.token_ecdsa_public_key,
@@ -234,6 +240,8 @@ fn default_redis_address() -> String {
 struct FileConfig {
     #[serde(default)]
     client_insecure: bool,
+    #[serde(default)]
+    client_anonymous: bool,
     #[serde(default)]
     token_hmac_secret_key: String,
     #[serde(default)]

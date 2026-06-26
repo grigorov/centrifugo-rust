@@ -57,13 +57,28 @@ async fn connect_proxy_grants_identity() {
 }
 
 #[tokio::test]
-async fn connect_proxy_denial_disconnects() {
+async fn connect_proxy_error_relays_error_reply() {
+    // Go connect_handler: a proxy `{"error":{...}}` is relayed as an error reply
+    // carrying the proxy's code (NOT a disconnect).
     let url = spawn_http_json(r#"{"error":{"code":1000,"message":"denied"}}"#.into()).await;
     let cfg = format!(r#"{{"proxy_connect_endpoint":"{url}"}}"#);
     let s = Server::start_with_config(&cfg).await;
 
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.send_raw(r#"{"id":1,"params":{}}"#).await;
+    let reply = c.next_json().await;
+    assert_eq!(reply["error"]["code"], 1000, "expected relayed proxy error: {reply}");
+}
+
+#[tokio::test]
+async fn connect_proxy_disconnect_closes_with_code() {
+    // Go connect_handler: a proxy `{"disconnect":{...}}` closes with that code.
+    let url = spawn_http_json(r#"{"disconnect":{"code":4500,"reason":"banned"}}"#.into()).await;
+    let cfg = format!(r#"{{"proxy_connect_endpoint":"{url}"}}"#);
+    let s = Server::start_with_config(&cfg).await;
+
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.send_raw(r#"{"id":1,"params":{}}"#).await;
     let (code, _reason) = c.next_close().await;
-    assert!(code >= 3000, "expected a disconnect close code, got {code}");
+    assert_eq!(code, 4500, "expected the proxy's disconnect code");
 }

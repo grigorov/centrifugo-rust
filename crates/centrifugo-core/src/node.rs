@@ -128,6 +128,10 @@ pub struct Node {
     engine: Arc<dyn Engine>,
     verifier: Arc<TokenVerifier>,
     client_insecure: bool,
+    /// Global connect-time anonymous access (Go `client_anonymous`): allow a
+    /// tokenless connection with an empty user id (distinct from the per-channel
+    /// `anonymous` subscribe option).
+    client_anonymous: bool,
     namespaces: Namespaces,
     /// Optional connect-proxy: when set, CONNECT is authenticated via this
     /// callback rather than a JWT.
@@ -141,11 +145,13 @@ impl Node {
     /// Build a node from a pre-constructed hub + engine (used when the engine is
     /// built asynchronously, e.g. the Redis engine). Pair with [`make_route`].
     /// `connect_proxy` enables proxy-based connect authentication when `Some`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_engine(
         hub: Arc<Hub>,
         engine: Arc<dyn Engine>,
         verifier: Arc<TokenVerifier>,
         client_insecure: bool,
+        client_anonymous: bool,
         namespaces: Namespaces,
         connect_proxy: Option<Arc<dyn ConnectProxy>>,
     ) -> Arc<Self> {
@@ -154,6 +160,7 @@ impl Node {
             engine,
             verifier,
             client_insecure,
+            client_anonymous,
             namespaces,
             connect_proxy,
             use_seq_gen: true,
@@ -169,7 +176,7 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
-        Self::new_with_engine(hub, engine, verifier, client_insecure, namespaces, None)
+        Self::new_with_engine(hub, engine, verifier, client_insecure, false, namespaces, None)
     }
 
     /// Build an insecure single-node memory node (no token, no presence). Used
@@ -196,6 +203,10 @@ impl Node {
 
     pub fn client_insecure(&self) -> bool {
         self.client_insecure
+    }
+
+    pub fn client_anonymous(&self) -> bool {
+        self.client_anonymous
     }
 
     /// The connect-proxy, if configured.

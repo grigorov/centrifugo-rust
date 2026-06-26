@@ -14,4 +14,4 @@ pub use engine::{Engine, NodeMessage, PublishOptions, RouteFn};
 pub use hub::{ClientHandle, ClientId, Hub, Out};
 pub use memory::MemoryEngine;
 pub use node::{make_route, ChannelOptions, Namespaces, Node, StreamPosition};
-pub use proxy::{ConnectProxy, ProxyConnectReply, ProxyConnectRequest};
+pub use proxy::{ConnectProxy, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest};
