@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use centrifugo_auth::TokenVerifier;
 use centrifugo_protocol::codec::{self, ProtocolType, WireType};
 use centrifugo_protocol::messages::{ClientInfo, Join, Leave, Publication};
-use centrifugo_protocol::{Push, PushType};
+use centrifugo_protocol::{Disconnect, Push, PushType};
 use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
@@ -380,7 +380,19 @@ fn deliver_push<T: Serialize + WireType>(hub: &Hub, channel: &str, push_type: Pu
         match handle.tx.try_send(Out::Frame(bytes.clone())) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
-                hub.remove(&handle.id);
+                // Slow (or gone) consumer: drop it from the hub so it stops
+                // contending, and — if it was still present — tell it to
+                // reconnect with DisconnectSlow (3008), matching Go. The Close is
+                // delivered in a detached task that awaits a queue slot, so the
+                // broadcaster is never blocked; if the socket is wedged the task
+                // resolves (Err) when the connection finally drops. The writer
+                // tasks already turn Out::Close into a 3008 close frame.
+                if hub.remove(&handle.id) {
+                    let tx = handle.tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(Out::Close(Disconnect::slow())).await;
+                    });
+                }
             }
         }
     }

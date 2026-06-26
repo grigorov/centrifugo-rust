@@ -382,7 +382,7 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                 nodes: vec![NodeResult {
                     uid: String::new(),
                     name: String::new(),
-                    version: String::new(),
+                    version: crate::VERSION.to_string(),
                     num_clients: node.hub().num_clients() as u32,
                     num_users: node.hub().num_users() as u32,
                     num_channels: node.hub().num_channels() as u32,

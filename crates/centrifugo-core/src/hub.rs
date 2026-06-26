@@ -80,8 +80,12 @@ impl Hub {
     }
 
     /// Remove a connection and all of its subscriptions.
-    pub fn remove(&self, id: &str) {
+    /// Remove a connection from the registry, users index, and all channel
+    /// subscriptions. Returns `true` if the connection was present (lets callers
+    /// fire a one-shot side effect, e.g. a slow-client close, exactly once).
+    pub fn remove(&self, id: &str) -> bool {
         let handle = self.conns.write().remove(id);
+        let was_present = handle.is_some();
         if let Some(h) = handle {
             let mut users = self.users.write();
             if let Some(set) = users.get_mut(&h.user) {
@@ -98,6 +102,7 @@ impl Hub {
                 !set.is_empty()
             });
         }
+        was_present
     }
 
     pub fn get(&self, id: &str) -> Option<ClientHandle> {
