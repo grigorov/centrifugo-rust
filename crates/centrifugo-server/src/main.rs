@@ -166,7 +166,6 @@ async fn main() -> anyhow::Result<()> {
             let api_auth = api::ApiAuth {
                 key: settings.api_key.clone(),
                 insecure: settings.api_insecure,
-                admin_secret: settings.admin_secret.clone(),
             };
             let admin_config = admin::AdminConfig {
                 enabled: settings.admin,

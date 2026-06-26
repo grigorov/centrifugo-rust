@@ -26,9 +26,6 @@ type Raw = Box<RawValue>;
 pub struct ApiAuth {
     pub key: String,
     pub insecure: bool,
-    /// Admin session secret; a valid `Bearer` admin token also authorizes the API
-    /// (empty disables admin-token auth).
-    pub admin_secret: String,
 }
 
 fn is_zero(n: &u32) -> bool {
@@ -129,6 +126,7 @@ struct NodeResult {
     uptime: u32,
 }
 
+/// `POST /api` — apikey-authenticated server API (matches Go's apiKeyAuth).
 pub async fn api_handler(
     State(node): State<Arc<Node>>,
     Extension(auth): Extension<ApiAuth>,
@@ -139,18 +137,49 @@ pub async fn api_handler(
     if !auth.insecure && !authorized(&auth, &headers, query.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    run_commands(&node, &body).await
+}
+
+/// `POST /admin/api` — admin-token-authenticated server API. Go guards this
+/// endpoint with `Authorization: token <admin-token>` (scheme is literally
+/// `token`, not `Bearer`), validated against `admin_secret`. The command
+/// surface is identical to `/api`.
+pub async fn admin_api_handler(
+    State(node): State<Arc<Node>>,
+    Extension(admin): Extension<crate::admin::AdminConfig>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if !admin.enabled || admin.secret.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let authed = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split_once(' '))
+        .is_some_and(|(scheme, val)| {
+            scheme.eq_ignore_ascii_case("token")
+                && centrifugo_auth::verify_admin_token(&admin.secret, val)
+        });
+    if !authed {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    run_commands(&node, &body).await
+}
+
+/// Decode the NDJSON command body, dispatch each, and return the NDJSON replies.
+async fn run_commands(node: &Arc<Node>, body: &str) -> Response {
     if body.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
     }
-
     let mut buf = String::new();
-    let de = serde_json::Deserializer::from_str(&body);
+    let de = serde_json::Deserializer::from_str(body);
     for cmd in de.into_iter::<ApiCommand>() {
         let cmd = match cmd {
             Ok(c) => c,
             Err(_) => return (StatusCode::BAD_REQUEST, "Bad Request").into_response(),
         };
-        let reply = dispatch(&node, cmd).await;
+        let reply = dispatch(node, cmd).await;
         buf.push_str(&serde_json::to_string(&reply).unwrap_or_else(|_| "{}".into()));
         buf.push('\n');
     }
@@ -161,29 +190,21 @@ pub async fn api_handler(
         .into_response()
 }
 
-/// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`,
-/// or a valid `Authorization: Bearer <admin-token>`. An empty configured api key
-/// never authorizes via apikey (matches Go).
+/// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`.
+/// An empty configured api key never authorizes (matches Go's apiKeyAuth, which
+/// accepts only the `apikey` scheme — admin tokens go to `/admin/api`).
 fn authorized(auth: &ApiAuth, headers: &HeaderMap, query: Option<&str>) -> bool {
-    if let Some(h) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(s) = h.to_str() {
-            let mut parts = s.split_whitespace();
-            if let (Some(scheme), Some(val)) = (parts.next(), parts.next()) {
-                if scheme.eq_ignore_ascii_case("apikey")
-                    && !auth.key.is_empty()
-                    && val == auth.key
-                {
-                    return true;
-                }
-                if scheme.eq_ignore_ascii_case("bearer")
-                    && centrifugo_auth::verify_admin_token(&auth.admin_secret, val)
-                {
-                    return true;
+    if !auth.key.is_empty() {
+        if let Some(h) = headers.get(axum::http::header::AUTHORIZATION) {
+            if let Ok(s) = h.to_str() {
+                let mut parts = s.split_whitespace();
+                if let (Some(scheme), Some(val)) = (parts.next(), parts.next()) {
+                    if scheme.eq_ignore_ascii_case("apikey") && val == auth.key {
+                        return true;
+                    }
                 }
             }
         }
-    }
-    if !auth.key.is_empty() {
         if let Some(q) = query {
             for pair in q.split('&') {
                 let mut it = pair.splitn(2, '=');

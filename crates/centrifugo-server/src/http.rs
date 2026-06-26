@@ -20,6 +20,7 @@ pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> 
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/admin/auth", post(admin::admin_auth))
+        .route("/admin/api", post(api::admin_api_handler))
         .route("/connection/websocket", get(ws::ws_handler))
         .route("/api", post(api::api_handler))
         // SockJS fallback transport (xhr-polling + /info).
