@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Header, Validation};
+use jsonwebtoken::{
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 
 use crate::claims::{ConnectTokenClaims, SubscribeTokenClaims};
 use crate::error::VerifyError;
@@ -175,6 +177,28 @@ impl TokenVerifier {
             expire_token_only: claims.expire_token_only,
         })
     }
+}
+
+/// Generate an HS256 connection token for `user` (used by the `gentoken` CLI).
+/// `ttl_secs == 0` omits `exp` (a non-expiring token).
+pub fn gen_connect_token(
+    hmac_secret: &str,
+    user: &str,
+    ttl_secs: u64,
+) -> Result<String, VerifyError> {
+    #[derive(serde::Serialize)]
+    struct Claims<'a> {
+        sub: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exp: Option<i64>,
+    }
+    let exp = (ttl_secs > 0).then(|| now_unix() + ttl_secs as i64);
+    encode(
+        &Header::new(Algorithm::HS256),
+        &Claims { sub: user, exp },
+        &EncodingKey::from_secret(hmac_secret.as_bytes()),
+    )
+    .map_err(|_| VerifyError::Invalid)
 }
 
 /// exp/nbf validity (matches Go's ErrTokenExpired path; absent claims pass).

@@ -115,6 +115,13 @@ impl Settings {
     }
 }
 
+/// Validate a config file body (parse + reject unknown structure). Used by the
+/// `checkconfig` subcommand.
+pub fn check_config(json: &str) -> anyhow::Result<()> {
+    let _fc: FileConfig = serde_json::from_str(json)?;
+    Ok(())
+}
+
 #[derive(Deserialize, Default)]
 struct ChannelOptionsCfg {
     #[serde(default)]

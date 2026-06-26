@@ -11,15 +11,61 @@ mod ws;
 
 use std::sync::Arc;
 
-use centrifugo_auth::TokenVerifier;
+use centrifugo_auth::{gen_connect_token, TokenVerifier};
 use centrifugo_core::{make_route, ConnectProxy, Engine, Hub, MemoryEngine, Node};
 use centrifugo_redis::RedisEngine;
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
-use crate::config::Settings;
+use crate::cli::{Cli, Command, GentokenArgs};
+use crate::config::{check_config, Settings};
 
 const VERSION: &str = "2.8.6";
+
+/// `gentoken`: print an HS256 connection JWT. The secret comes from `--config`'s
+/// `token_hmac_secret_key` (or the `--token_hmac_secret_key` flag, which wins).
+fn gentoken(args: GentokenArgs) -> anyhow::Result<()> {
+    let secret = if !args.token_hmac_secret_key.is_empty() {
+        args.token_hmac_secret_key
+    } else if let Some(path) = &args.config {
+        let json = std::fs::read_to_string(path)?;
+        let v: serde_json::Value = serde_json::from_str(&json)?;
+        v.get("token_hmac_secret_key")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        String::new()
+    };
+    if secret.is_empty() {
+        anyhow::bail!("no HMAC secret: pass --token_hmac_secret_key or -c <config>");
+    }
+    let token = gen_connect_token(&secret, &args.user, args.ttl)
+        .map_err(|e| anyhow::anyhow!("generate token: {e}"))?;
+    println!("{token}");
+    Ok(())
+}
+
+/// `genconfig`: write a fresh config with random secrets.
+fn genconfig(path: &str) -> anyhow::Result<()> {
+    if std::path::Path::new(path).exists() {
+        anyhow::bail!("{path} already exists");
+    }
+    let cfg = serde_json::json!({
+        "token_hmac_secret_key": uuid::Uuid::new_v4().to_string(),
+        "api_key": uuid::Uuid::new_v4().to_string(),
+    });
+    std::fs::write(path, serde_json::to_string_pretty(&cfg)?)?;
+    println!("config written to {path}");
+    Ok(())
+}
+
+/// `checkconfig`: validate a config file; non-zero exit on error.
+fn checkconfig(path: &str) -> anyhow::Result<()> {
+    let json = std::fs::read_to_string(path)?;
+    check_config(&json).map_err(|e| anyhow::anyhow!("invalid config {path}: {e}"))?;
+    println!("config {path} is valid");
+    Ok(())
+}
 
 fn read_pem_opt(path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     if path.is_empty() {
@@ -65,6 +111,9 @@ async fn main() -> anyhow::Result<()> {
             println!("Centrifugo v{VERSION}");
             Ok(())
         }
+        Command::Gentoken(args) => gentoken(args),
+        Command::Genconfig(args) => genconfig(&args.config),
+        Command::Checkconfig(args) => checkconfig(&args.config),
         Command::Serve(args) => {
             tracing_subscriber::fmt()
                 .with_env_filter(

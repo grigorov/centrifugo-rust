@@ -197,6 +197,20 @@ pub(crate) fn pick_port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
+/// Run a `centrifugo` subcommand (e.g. `gentoken`/`checkconfig`); return its exit
+/// code and captured stdout. Builds the binary first if needed.
+pub fn run_cli(args: &[&str]) -> (i32, String) {
+    ensure_binary_built();
+    let out = Command::new(bin_path())
+        .args(args)
+        .output()
+        .expect("run centrifugo subcommand");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
 /// Merge `grpc_api`/`grpc_api_port`/`grpc_api_key` into a JSON config object so
 /// both harnesses configure the gRPC API the same way (Go and Rust read the same
 /// keys). Returns the serialized config.

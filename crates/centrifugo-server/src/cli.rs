@@ -17,8 +17,37 @@ pub struct Cli {
 pub enum Command {
     /// Run the server.
     Serve(ServeArgs),
+    /// Generate a connection JWT (HS256) for a user.
+    Gentoken(GentokenArgs),
+    /// Write a fresh config file with generated secrets.
+    Genconfig(ConfigPathArgs),
+    /// Validate a config file and exit non-zero on error.
+    Checkconfig(ConfigPathArgs),
     /// Print version and exit.
     Version,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct GentokenArgs {
+    /// Config file to read `token_hmac_secret_key` from.
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<String>,
+    /// Subject (user id) for the token.
+    #[arg(short = 'u', long = "user", default_value = "")]
+    pub user: String,
+    /// Token TTL in seconds (0 = no expiry).
+    #[arg(long = "ttl", default_value_t = 0)]
+    pub ttl: u64,
+    /// HMAC secret (overrides the config file).
+    #[arg(long = "token_hmac_secret_key", default_value = "")]
+    pub token_hmac_secret_key: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ConfigPathArgs {
+    /// Config file path.
+    #[arg(short = 'c', long = "config", default_value = "config.json")]
+    pub config: String,
 }
 
 #[derive(clap::Args, Debug)]
