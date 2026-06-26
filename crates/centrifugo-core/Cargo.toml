@@ -1,0 +1,15 @@
+[package]
+name = "centrifugo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+centrifugo-protocol = { path = "../centrifugo-protocol" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
