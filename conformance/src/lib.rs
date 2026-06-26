@@ -224,6 +224,52 @@ pub fn run_cli(args: &[&str]) -> (i32, String) {
     )
 }
 
+/// Run the real `centrifuge-go` v0.6.2 SDK probe (`conformance/go-client`)
+/// against `ws_url`: connect → subscribe → publish → receive. Returns the
+/// process exit code + stdout, or `None` when `go` is unavailable (the test
+/// skips, like the Go-oracle differential tests). The probe prints `OK` and
+/// exits 0 on success.
+pub fn run_go_client(ws_url: &str) -> Option<(i32, String)> {
+    run_go_client_token(ws_url, "")
+}
+
+/// Like [`run_go_client`], passing a connection JWT to the SDK (exercises the
+/// token-auth path). An empty `token` is omitted.
+pub fn run_go_client_token(ws_url: &str, token: &str) -> Option<(i32, String)> {
+    if Command::new("go")
+        .arg("version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        eprintln!("`go` unavailable; skipping centrifuge-go live SDK test");
+        return None;
+    }
+    let dir = {
+        let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("go-client");
+        p
+    };
+    let mut args = vec!["run".to_string(), ".".to_string(), ws_url.to_string()];
+    if !token.is_empty() {
+        args.push(token.to_string());
+    }
+    let out = Command::new("go")
+        .args(&args)
+        // -mod=mod so `go run` resolves the pinned deps without a committed vendor dir.
+        .env("GOFLAGS", "-mod=mod")
+        .current_dir(&dir)
+        .output()
+        .expect("run centrifuge-go client");
+    Some((
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr),
+    ))
+}
+
 /// Merge `grpc_api`/`grpc_api_port`/`grpc_api_key` into a JSON config object so
 /// both harnesses configure the gRPC API the same way (Go and Rust read the same
 /// keys). Returns the serialized config.
