@@ -127,19 +127,31 @@ async fn main() -> anyhow::Result<()> {
                 None => Settings::from_args(&args),
             };
             settings.apply_env();
-            let rsa_pem = read_pem_opt(&settings.token_rsa_public_key)?;
-            let ecdsa_pem = read_pem_opt(&settings.token_ecdsa_public_key)?;
-            let verifier = Arc::new(
-                TokenVerifier::new(
-                    &settings.token_hmac_secret_key,
-                    rsa_pem.as_deref(),
-                    ecdsa_pem.as_deref(),
+            // Go's verifier is JWKS-exclusive: when a JWKS endpoint is set it
+            // verifies tokens ONLY by JWK (kid), never falling back to static
+            // keys. Mirror that by building the verifier with no static keys
+            // when JWKS is configured.
+            let jwks_enabled = !settings.token_jwks_public_endpoint.is_empty();
+            let (rsa_pem, ecdsa_pem) = if jwks_enabled {
+                (None, None)
+            } else {
+                (
+                    read_pem_opt(&settings.token_rsa_public_key)?,
+                    read_pem_opt(&settings.token_ecdsa_public_key)?,
                 )
-                .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?,
+            };
+            let hmac_secret = if jwks_enabled {
+                ""
+            } else {
+                &settings.token_hmac_secret_key
+            };
+            let verifier = Arc::new(
+                TokenVerifier::new(hmac_secret, rsa_pem.as_deref(), ecdsa_pem.as_deref())
+                    .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?,
             );
             // JWKS: fetch once now (so a token's `kid` verifies as soon as the
             // server is healthy), then refresh in the background.
-            if !settings.token_jwks_public_endpoint.is_empty() {
+            if jwks_enabled {
                 let url = settings.token_jwks_public_endpoint.clone();
                 match fetch_jwks(&url).await {
                     Ok(body) => {

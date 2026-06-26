@@ -555,9 +555,12 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// offset = gen<<32 | seq (centrifuge recovery.PackUint64).
+/// offset = gen*MaxUint32 + seq (centrifuge recovery.PackUint64). Note this is
+/// intentionally NOT the inverse of `unpack_offset` (>>32) — centrifuge v0.14.2's
+/// pack/unpack are asymmetric, and we replicate that quirk verbatim for wire
+/// compatibility. For gen==0 (normal operation) both reduce to `seq`.
 fn pack_offset(seq: u32, gen: u32) -> u64 {
-    ((gen as u64) << 32) | (seq as u64)
+    (gen as u64) * (u32::MAX as u64) + (seq as u64)
 }
 
 /// (seq, gen) from offset (centrifuge recovery.UnpackUint64).

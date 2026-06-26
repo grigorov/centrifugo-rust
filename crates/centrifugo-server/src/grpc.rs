@@ -215,11 +215,9 @@ impl Centrifugo for GrpcApi {
 
 /// `apikey <KEY>` (case-insensitive scheme) — matches the HTTP API's header form.
 fn check_apikey(header: &str, key: &str) -> bool {
-    let mut parts = header.split_whitespace();
-    matches!(
-        (parts.next(), parts.next()),
-        (Some(scheme), Some(val)) if scheme.eq_ignore_ascii_case("apikey") && val == key
-    )
+    // Go compares the full metadata value against `"apikey " + key` exactly
+    // (case-sensitive scheme, single space) — not a lenient scheme split.
+    header.as_bytes() == format!("apikey {key}").as_bytes()
 }
 
 /// Serve the gRPC API on `addr`. When `api_key` is non-empty, every call must
