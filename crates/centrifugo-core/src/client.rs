@@ -8,9 +8,10 @@ use std::sync::Arc;
 use centrifugo_auth::VerifyError;
 use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
-    ClientInfo, ConnectRequest, ConnectResult, PingResult, PresenceRequest, PresenceResult,
-    PresenceStatsRequest, PresenceStatsResult, PublishRequest, PublishResult, RefreshRequest,
-    RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, PingResult,
+    PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, PublishRequest,
+    PublishResult, RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult,
+    UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
@@ -74,6 +75,10 @@ impl Client {
         }
     }
 
+    fn is_subscribed(&self, channel: &str) -> bool {
+        self.subscriptions.iter().any(|c| c == channel)
+    }
+
     /// Build the ClientInfo for this connection (publisher/presence/join-leave).
     fn client_info(&self) -> ClientInfo {
         ClientInfo {
@@ -111,9 +116,9 @@ impl Client {
             }
             MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd)),
             MethodType::PresenceStats => CommandOutcome::replies(self.on_presence_stats(cmd)),
-            // Features that arrive in later milestones report "not available"
-            // (matching Go when the feature/handler is absent).
-            MethodType::History | MethodType::SubRefresh => {
+            MethodType::History => CommandOutcome::replies(self.on_history(cmd)),
+            // SUB_REFRESH lands with private channels (M6).
+            MethodType::SubRefresh => {
                 CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())])
             }
         }
@@ -201,13 +206,78 @@ impl Client {
         if !self.subscriptions.iter().any(|c| c == &req.channel) {
             self.subscriptions.push(req.channel.clone());
         }
-        let reply = ok_reply(self.proto, cmd.id, &SubscribeResult::default());
+
+        // Recovery (when the channel offers it via history_recover).
+        let mut result = SubscribeResult::default();
+        if self.node.opts().history_recover {
+            result.recoverable = true;
+            let use_seq_gen = self.node.use_seq_gen();
+            if req.recover {
+                // The client may send seq/gen (centrifugo v2.8.6 default) or offset.
+                let cmd_offset = if req.seq > 0 || req.gen > 0 {
+                    pack_offset(req.seq, req.gen)
+                } else {
+                    req.offset
+                };
+                let (mut pubs, top) = self
+                    .node
+                    .history_since(&req.channel, cmd_offset, &req.epoch);
+                let next = cmd_offset + 1;
+                result.recovered = match pubs.first() {
+                    Some(first) => first.offset == next && top.epoch == req.epoch,
+                    None => top.offset == cmd_offset && top.epoch == req.epoch,
+                };
+                result.epoch = top.epoch;
+                encode_position(&mut result, top.offset, use_seq_gen);
+                if use_seq_gen {
+                    for p in &mut pubs {
+                        let (s, g) = unpack_offset(p.offset);
+                        p.seq = s;
+                        p.gen = g;
+                        p.offset = 0;
+                    }
+                    // centrifuge returns recovered publications newest-first
+                    // (descending) under the seq/gen compatibility mode.
+                    pubs.reverse();
+                }
+                result.publications = pubs;
+            } else {
+                let (_pubs, top) = self.node.history(&req.channel);
+                result.epoch = top.epoch;
+                encode_position(&mut result, top.offset, use_seq_gen);
+            }
+        }
+
+        let reply = ok_reply(self.proto, cmd.id, &result);
         // Join is published after the subscribe reply; the joiner is now a
         // subscriber (matches centrifuge ordering).
         if join_leave {
             self.node.publish_join(&req.channel, self.client_info());
         }
         vec![reply]
+    }
+
+    fn on_history(&mut self, cmd: &Command) -> Vec<Reply> {
+        let req: HistoryRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return vec![Reply::err(cmd.id, e)],
+        };
+        if !self.node.opts().history_enabled() {
+            return vec![Reply::err(cmd.id, Error::not_available())];
+        }
+        if !self.is_subscribed(&req.channel) {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
+        }
+        let (mut publications, _top) = self.node.history(&req.channel);
+        if self.node.use_seq_gen() {
+            for p in &mut publications {
+                let (s, g) = unpack_offset(p.offset);
+                p.seq = s;
+                p.gen = g;
+            }
+        }
+        let result = HistoryResult { publications };
+        vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
     fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -222,9 +292,7 @@ impl Client {
         // A client-initiated publication carries the publisher's ClientInfo,
         // matching Go centrifuge behavior.
         let info = self.client_info();
-        if let Err(_e) = self.node.broker().publish(&req.channel, data, Some(info)) {
-            return vec![Reply::err(cmd.id, Error::internal())];
-        }
+        self.node.publish(&req.channel, data, Some(info));
         vec![ok_reply(self.proto, cmd.id, &PublishResult {})]
     }
 
@@ -267,6 +335,9 @@ impl Client {
         if !presence || disable_for_client {
             return vec![Reply::err(cmd.id, Error::not_available())];
         }
+        if !self.is_subscribed(&req.channel) {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
+        }
         let result = PresenceResult {
             presence: self.node.presence(&req.channel),
         };
@@ -284,6 +355,9 @@ impl Client {
         };
         if !presence || disable_for_client {
             return vec![Reply::err(cmd.id, Error::not_available())];
+        }
+        if !self.is_subscribed(&req.channel) {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
         let (num_clients, num_users) = self.node.presence_stats(&req.channel);
         let result = PresenceStatsResult {
@@ -371,4 +445,25 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// offset = gen<<32 | seq (centrifuge recovery.PackUint64).
+fn pack_offset(seq: u32, gen: u32) -> u64 {
+    ((gen as u64) << 32) | (seq as u64)
+}
+
+/// (seq, gen) from offset (centrifuge recovery.UnpackUint64).
+fn unpack_offset(v: u64) -> (u32, u32) {
+    (v as u32, (v >> 32) as u32)
+}
+
+/// Encode a stream-top position into a SubscribeResult as seq/gen or offset.
+fn encode_position(result: &mut SubscribeResult, offset: u64, use_seq_gen: bool) {
+    if use_seq_gen {
+        let (s, g) = unpack_offset(offset);
+        result.seq = s;
+        result.gen = g;
+    } else {
+        result.offset = offset;
+    }
 }

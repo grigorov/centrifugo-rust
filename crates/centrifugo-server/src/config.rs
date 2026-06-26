@@ -20,6 +20,12 @@ pub struct Config {
     /// Disable the client-side PRESENCE/PRESENCE_STATS commands even if presence
     /// is enabled.
     pub presence_disable_for_client: bool,
+    /// Max publications kept in channel history (0 disables history).
+    pub history_size: usize,
+    /// History retention in seconds (0 disables history).
+    pub history_lifetime: u64,
+    /// Offer (re)subscribe recovery on channels.
+    pub history_recover: bool,
 }
 
 impl Config {

@@ -6,10 +6,10 @@
 //! ignored in the domain direction.
 
 use crate::messages::{
-    ClientInfo, ConnectRequest, ConnectResult, Join, Leave, PresenceRequest, PresenceResult,
-    PresenceStatsRequest, PresenceStatsResult, Publication, PublishRequest, PublishResult,
-    RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
-    UnsubscribeResult,
+    ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, Join, Leave,
+    PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, Publication,
+    PublishRequest, PublishResult, RefreshRequest, RefreshResult, SubscribeRequest,
+    SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{pb, Command, Error, Push, Reply};
@@ -192,6 +192,8 @@ impl From<pb::SubscribeRequest> for SubscribeRequest {
             channel: r.channel,
             token: r.token,
             recover: r.recover,
+            seq: r.seq,
+            gen: r.gen,
             epoch: r.epoch,
             offset: r.offset,
         }
@@ -203,8 +205,8 @@ impl From<SubscribeRequest> for pb::SubscribeRequest {
             channel: r.channel,
             token: r.token,
             recover: r.recover,
-            seq: 0,
-            gen: 0,
+            seq: r.seq,
+            gen: r.gen,
             epoch: r.epoch,
             offset: r.offset,
         }
@@ -217,8 +219,8 @@ impl From<SubscribeResult> for pb::SubscribeResult {
             expires: r.expires,
             ttl: r.ttl,
             recoverable: r.recoverable,
-            seq: 0,
-            gen: 0,
+            seq: r.seq,
+            gen: r.gen,
             epoch: r.epoch,
             publications: r.publications.into_iter().map(Into::into).collect(),
             recovered: r.recovered,
@@ -232,6 +234,8 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             expires: r.expires,
             ttl: r.ttl,
             recoverable: r.recoverable,
+            seq: r.seq,
+            gen: r.gen,
             epoch: r.epoch,
             publications: r.publications.into_iter().map(Into::into).collect(),
             recovered: r.recovered,
@@ -292,6 +296,34 @@ impl From<pb::PresenceStatsResult> for PresenceStatsResult {
         PresenceStatsResult {
             num_clients: r.num_clients,
             num_users: r.num_users,
+        }
+    }
+}
+
+// ---- History ----
+
+impl From<pb::HistoryRequest> for HistoryRequest {
+    fn from(r: pb::HistoryRequest) -> Self {
+        HistoryRequest { channel: r.channel }
+    }
+}
+impl From<HistoryRequest> for pb::HistoryRequest {
+    fn from(r: HistoryRequest) -> Self {
+        pb::HistoryRequest { channel: r.channel }
+    }
+}
+
+impl From<HistoryResult> for pb::HistoryResult {
+    fn from(r: HistoryResult) -> Self {
+        pb::HistoryResult {
+            publications: r.publications.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::HistoryResult> for HistoryResult {
+    fn from(r: pb::HistoryResult) -> Self {
+        HistoryResult {
+            publications: r.publications.into_iter().map(Into::into).collect(),
         }
     }
 }

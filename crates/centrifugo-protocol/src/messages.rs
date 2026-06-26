@@ -61,6 +61,10 @@ pub struct SubscribeRequest {
     pub token: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recover: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub seq: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub gen: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
@@ -75,6 +79,10 @@ pub struct SubscribeResult {
     pub ttl: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub recoverable: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub seq: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub gen: u32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -113,6 +121,21 @@ pub struct UnsubscribeResult {}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PingResult {}
+
+// ---- History ----
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct HistoryRequest {
+    #[serde(default)]
+    pub channel: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct HistoryResult {
+    /// No `omitempty`: an empty history serializes as `"publications":[]`.
+    #[serde(default)]
+    pub publications: Vec<Publication>,
+}
 
 // ---- Refresh ----
 

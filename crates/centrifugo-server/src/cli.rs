@@ -45,4 +45,13 @@ pub struct ServeArgs {
     /// Disable client-side presence commands even when presence is enabled.
     #[arg(long = "presence_disable_for_client")]
     pub presence_disable_for_client: bool,
+    /// Max publications kept in channel history (0 disables history).
+    #[arg(long = "history_size", default_value_t = 0)]
+    pub history_size: usize,
+    /// History retention in seconds (0 disables history).
+    #[arg(long = "history_lifetime", default_value_t = 0)]
+    pub history_lifetime: u64,
+    /// Offer (re)subscribe recovery on channels.
+    #[arg(long = "history_recover")]
+    pub history_recover: bool,
 }

@@ -4,8 +4,9 @@
 //! a full (slow) or closed queue causes that client to be dropped, never
 //! blocking the broadcaster.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use centrifugo_auth::TokenVerifier;
 use centrifugo_protocol::codec::{self, ProtocolType, WireType};
@@ -21,13 +22,72 @@ use crate::engine::Broker;
 use crate::hub::{Hub, Out};
 use crate::memory::MemoryBroker;
 
-/// Channel options. In M4 a single default set applies to every channel; full
+/// Channel options. In M4/M5 a single default set applies to every channel; full
 /// per-namespace options arrive in M6.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelOptions {
     pub presence: bool,
     pub join_leave: bool,
     pub presence_disable_for_client: bool,
+    /// Max publications kept in a channel's history (0 = history disabled).
+    pub history_size: usize,
+    /// History retention in seconds (0 = history disabled).
+    pub history_lifetime: u64,
+    /// Whether (re)subscribe recovery is offered on channels.
+    pub history_recover: bool,
+}
+
+impl ChannelOptions {
+    /// History is active only when both size and lifetime are positive (matches Go).
+    pub fn history_enabled(&self) -> bool {
+        self.history_size > 0 && self.history_lifetime > 0
+    }
+}
+
+/// Current top of a channel's history stream.
+#[derive(Debug, Clone, Default)]
+pub struct StreamPosition {
+    pub offset: u64,
+    pub epoch: String,
+}
+
+/// In-memory per-channel history stream: a monotonic offset, a random epoch
+/// (detects stream loss), and a size-bounded ring of publications.
+struct Stream {
+    offset: u64,
+    epoch: String,
+    pubs: VecDeque<Publication>,
+    /// Unix seconds when this stream's history expires (lazy TTL).
+    expire_at: i64,
+}
+
+impl Stream {
+    fn new() -> Self {
+        Stream {
+            offset: 0,
+            epoch: new_epoch(),
+            pubs: VecDeque::new(),
+            expire_at: i64::MAX,
+        }
+    }
+    fn position(&self) -> StreamPosition {
+        StreamPosition {
+            offset: self.offset,
+            epoch: self.epoch.clone(),
+        }
+    }
+}
+
+fn new_epoch() -> String {
+    // Opaque per-stream token; only stability + change-on-recreate matter.
+    uuid::Uuid::new_v4().simple().to_string()[..10].to_string()
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub struct Node {
@@ -39,6 +99,11 @@ pub struct Node {
     /// In-memory presence: channel -> (clientID -> ClientInfo). The memory
     /// engine has no TTL (matches centrifuge MemoryEngine).
     presence: Mutex<HashMap<String, HashMap<String, ClientInfo>>>,
+    /// In-memory history streams: channel -> Stream.
+    history: Mutex<HashMap<String, Stream>>,
+    /// Use seq/gen instead of offset on the wire (centrifugo v2.8.6 default:
+    /// config `v3_use_offset=false`). Real SDKs of this era expect seq/gen.
+    use_seq_gen: bool,
 }
 
 impl Node {
@@ -61,6 +126,8 @@ impl Node {
             client_insecure,
             opts,
             presence: Mutex::new(HashMap::new()),
+            history: Mutex::new(HashMap::new()),
+            use_seq_gen: true,
         })
     }
 
@@ -92,6 +159,10 @@ impl Node {
 
     pub fn opts(&self) -> &ChannelOptions {
         &self.opts
+    }
+
+    pub fn use_seq_gen(&self) -> bool {
+        self.use_seq_gen
     }
 
     // ---- presence ----
@@ -142,6 +213,85 @@ impl Node {
 
     pub fn publish_leave(&self, channel: &str, info: ClientInfo) {
         deliver_push(&self.hub, channel, PushType::Leave, &Leave { info });
+    }
+
+    // ---- publish + history ----
+
+    /// Publish to a channel: append to history (when enabled) assigning an
+    /// offset, then fan out the live publication (offset zeroed on the wire,
+    /// matching Go hub.go).
+    pub fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
+        if self.opts.history_enabled() {
+            self.add_to_history(channel, data, info.clone());
+        }
+        let _ = self.broker.publish(channel, data, info);
+    }
+
+    fn add_to_history(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
+        let mut hist = self.history.lock();
+        let lifetime = self.opts.history_lifetime as i64;
+        let size = self.opts.history_size;
+        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
+        stream.offset += 1;
+        let publication = Publication {
+            data: Some(Raw::from_bytes(data)),
+            info,
+            offset: stream.offset,
+            ..Default::default()
+        };
+        stream.pubs.push_back(publication);
+        while stream.pubs.len() > size {
+            stream.pubs.pop_front();
+        }
+        stream.expire_at = now_unix() + lifetime;
+    }
+
+    /// Full history (all retained publications) + current top position. Creates
+    /// an (empty) stream on first access so the epoch is stable thereafter.
+    pub fn history(&self, channel: &str) -> (Vec<Publication>, StreamPosition) {
+        let mut hist = self.history.lock();
+        if hist
+            .get(channel)
+            .map(|s| now_unix() > s.expire_at)
+            .unwrap_or(false)
+        {
+            hist.remove(channel);
+        }
+        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
+        (stream.pubs.iter().cloned().collect(), stream.position())
+    }
+
+    /// Publications after `since_offset` + current top position (recovery).
+    pub fn history_since(
+        &self,
+        channel: &str,
+        since_offset: u64,
+        since_epoch: &str,
+    ) -> (Vec<Publication>, StreamPosition) {
+        let mut hist = self.history.lock();
+        if hist
+            .get(channel)
+            .map(|s| now_unix() > s.expire_at)
+            .unwrap_or(false)
+        {
+            hist.remove(channel);
+        }
+        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
+        let top = stream.position();
+        if top.offset == since_offset && top.epoch == since_epoch {
+            return (Vec::new(), top);
+        }
+        let pubs = stream
+            .pubs
+            .iter()
+            .filter(|p| p.offset > since_offset)
+            .cloned()
+            .collect();
+        (pubs, top)
+    }
+
+    pub fn remove_history(&self, channel: &str) {
+        self.history.lock().remove(channel);
     }
 
     /// Create a per-connection client bound to this node, writing to `tx`.

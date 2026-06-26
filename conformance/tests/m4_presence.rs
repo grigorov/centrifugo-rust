@@ -60,7 +60,8 @@ async fn presence_disabled_returns_not_available() {
 
 #[tokio::test]
 async fn presence_stats_matches_go() {
-    let Some(go) = Oracle::start_with(&["--client_insecure", "--presence"]).await else {
+    let Some(go) = Oracle::start_with_config(r#"{"client_insecure":true,"presence":true}"#).await
+    else {
         return;
     };
     let rust = Server::start_with(&["--client_insecure", "--presence"]).await;
@@ -73,7 +74,8 @@ async fn presence_stats_matches_go() {
 
 #[tokio::test]
 async fn presence_entry_shape_matches_go() {
-    let Some(go) = Oracle::start_with(&["--client_insecure", "--presence"]).await else {
+    let Some(go) = Oracle::start_with_config(r#"{"client_insecure":true,"presence":true}"#).await
+    else {
         return;
     };
     let rust = Server::start_with(&["--client_insecure", "--presence"]).await;

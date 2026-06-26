@@ -64,7 +64,7 @@ impl Server {
             http: format!("http://127.0.0.1:{port}"),
         };
         let client = reqwest::Client::new();
-        for _ in 0..100 {
+        for _ in 0..200 {
             if let Ok(resp) = client.get(format!("{}/health", server.http)).send().await {
                 if resp.status().is_success() {
                     return server;
@@ -192,6 +192,30 @@ impl WsJsonClient {
     pub async fn unsubscribe(&mut self, id: u32, channel: &str) -> serde_json::Value {
         self.send_raw(&format!(
             r#"{{"id":{id},"method":2,"params":{{"channel":"{channel}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
+    /// Subscribe with the recover flag + last seen offset/epoch.
+    pub async fn subscribe_recover(
+        &mut self,
+        id: u32,
+        channel: &str,
+        offset: u64,
+        epoch: &str,
+    ) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":1,"params":{{"channel":"{channel}","recover":true,"offset":{offset},"epoch":"{epoch}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
+    /// HISTORY command (method 6).
+    pub async fn history(&mut self, id: u32, channel: &str) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":6,"params":{{"channel":"{channel}"}}}}"#
         ))
         .await;
         self.next_json().await

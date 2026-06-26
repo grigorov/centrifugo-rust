@@ -98,7 +98,8 @@ async fn refresh_with_valid_token_succeeds() {
 
 #[tokio::test]
 async fn connect_reply_shape_matches_go() {
-    let Some(go) = Oracle::start_with(&["--token_hmac_secret_key", SECRET]).await else {
+    // Go takes the HMAC secret via config file, not a CLI flag.
+    let Some(go) = Oracle::start_with_config(r#"{"token_hmac_secret_key":"secret"}"#).await else {
         return;
     };
     let rust = Server::start_with(&["--token_hmac_secret_key", SECRET]).await;

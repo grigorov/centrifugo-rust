@@ -49,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
                 presence: args.presence,
                 join_leave: args.join_leave,
                 presence_disable_for_client: args.presence_disable_for_client,
+                history_size: args.history_size,
+                history_lifetime: args.history_lifetime,
+                history_recover: args.history_recover,
             };
             let rsa_pem = read_pem_opt(&cfg.token_rsa_public_key)?;
             let ecdsa_pem = read_pem_opt(&cfg.token_ecdsa_public_key)?;
@@ -62,6 +65,9 @@ async fn main() -> anyhow::Result<()> {
                 presence: cfg.presence,
                 join_leave: cfg.join_leave,
                 presence_disable_for_client: cfg.presence_disable_for_client,
+                history_size: cfg.history_size,
+                history_lifetime: cfg.history_lifetime,
+                history_recover: cfg.history_recover,
             };
             let node = Node::new_with(Arc::new(verifier), cfg.client_insecure, opts);
             let app = http::router(Arc::clone(&node));
