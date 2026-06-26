@@ -1,29 +1,29 @@
-//! The `Node` ties the `Hub` and a `Broker` together and owns the local
-//! publication fan-out. A publication is encoded **once** and the resulting
-//! frame bytes are cloned + `try_send`'d to each subscriber's bounded queue;
-//! a full (slow) or closed queue causes that client to be dropped, never
-//! blocking the broadcaster.
+//! The `Node` ties the `Hub` and an `Engine` together and owns the local
+//! publication fan-out. A publication is encoded **once** per protocol and the
+//! resulting frame bytes are cloned + `try_send`'d to each subscriber's bounded
+//! queue; a full (slow) or closed queue causes that client to be dropped, never
+//! blocking the broadcaster. The engine (memory or Redis) decides where a
+//! publication comes from; it calls back through the installed [`RouteFn`] to
+//! reach this node's local subscribers.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use centrifugo_auth::TokenVerifier;
 use centrifugo_protocol::codec::{self, ProtocolType, WireType};
 use centrifugo_protocol::messages::{ClientInfo, Join, Leave, Publication};
-use centrifugo_protocol::{Push, PushType, Raw};
-use parking_lot::Mutex;
+use centrifugo_protocol::{Push, PushType};
 use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
 use crate::client::Client;
-use crate::engine::Broker;
+use crate::engine::{Engine, NodeMessage, PublishOptions, RouteFn};
 use crate::hub::{Hub, Out};
-use crate::memory::MemoryBroker;
+use crate::memory::MemoryEngine;
 
-/// Channel options. In M4/M5 a single default set applies to every channel; full
-/// per-namespace options arrive in M6.
+/// Channel options. Resolved per-channel from the namespace registry.
 #[derive(Debug, Clone, Default)]
 pub struct ChannelOptions {
     pub presence: bool,
@@ -45,6 +45,18 @@ impl ChannelOptions {
     /// History is active only when both size and lifetime are positive (matches Go).
     pub fn history_enabled(&self) -> bool {
         self.history_size > 0 && self.history_lifetime > 0
+    }
+
+    /// Per-publish history directives for this channel.
+    pub fn publish_options(&self) -> PublishOptions {
+        if self.history_enabled() {
+            PublishOptions {
+                history_size: self.history_size,
+                history_lifetime: self.history_lifetime,
+            }
+        } else {
+            PublishOptions::default()
+        }
     }
 }
 
@@ -98,39 +110,12 @@ pub struct StreamPosition {
     pub epoch: String,
 }
 
-/// In-memory per-channel history stream: a monotonic offset, a random epoch
-/// (detects stream loss), and a size-bounded ring of publications.
-struct Stream {
-    offset: u64,
-    epoch: String,
-    pubs: VecDeque<Publication>,
-    /// Unix seconds when this stream's history expires (lazy TTL).
-    expire_at: i64,
-}
-
-impl Stream {
-    fn new() -> Self {
-        Stream {
-            offset: 0,
-            epoch: new_epoch(),
-            pubs: VecDeque::new(),
-            expire_at: i64::MAX,
-        }
-    }
-    fn position(&self) -> StreamPosition {
-        StreamPosition {
-            offset: self.offset,
-            epoch: self.epoch.clone(),
-        }
-    }
-}
-
-fn new_epoch() -> String {
-    // Opaque per-stream token; only stability + change-on-recreate matter.
+/// Opaque per-stream token; only stability + change-on-recreate matter.
+pub(crate) fn new_epoch() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..10].to_string()
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -139,43 +124,45 @@ fn now_unix() -> i64 {
 
 pub struct Node {
     hub: Arc<Hub>,
-    broker: Arc<dyn Broker>,
+    engine: Arc<dyn Engine>,
     verifier: Arc<TokenVerifier>,
     client_insecure: bool,
     namespaces: Namespaces,
-    /// In-memory presence: channel -> (clientID -> ClientInfo). The memory
-    /// engine has no TTL (matches centrifuge MemoryEngine).
-    presence: Mutex<HashMap<String, HashMap<String, ClientInfo>>>,
-    /// In-memory history streams: channel -> Stream.
-    history: Mutex<HashMap<String, Stream>>,
     /// Use seq/gen instead of offset on the wire (centrifugo v2.8.6 default:
     /// config `v3_use_offset=false`). Real SDKs of this era expect seq/gen.
     use_seq_gen: bool,
 }
 
 impl Node {
+    /// Build a node from a pre-constructed hub + engine (used when the engine is
+    /// built asynchronously, e.g. the Redis engine). Pair with [`make_route`].
+    pub fn new_with_engine(
+        hub: Arc<Hub>,
+        engine: Arc<dyn Engine>,
+        verifier: Arc<TokenVerifier>,
+        client_insecure: bool,
+        namespaces: Namespaces,
+    ) -> Arc<Self> {
+        Arc::new(Node {
+            hub,
+            engine,
+            verifier,
+            client_insecure,
+            namespaces,
+            use_seq_gen: true,
+        })
+    }
+
     /// Build a single-node memory node with the given verifier, insecure flag,
-    /// and default channel options.
+    /// and namespaces.
     pub fn new_with(
         verifier: Arc<TokenVerifier>,
         client_insecure: bool,
         namespaces: Namespaces,
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
-        let hub_for_route = hub.clone();
-        let broker: Arc<dyn Broker> = Arc::new(MemoryBroker::new(move |channel, data, info| {
-            deliver_publication(&hub_for_route, &channel, &data, info);
-        }));
-        Arc::new(Node {
-            hub,
-            broker,
-            verifier,
-            client_insecure,
-            namespaces,
-            presence: Mutex::new(HashMap::new()),
-            history: Mutex::new(HashMap::new()),
-            use_seq_gen: true,
-        })
+        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
+        Self::new_with_engine(hub, engine, verifier, client_insecure, namespaces)
     }
 
     /// Build an insecure single-node memory node (no token, no presence). Used
@@ -192,8 +179,8 @@ impl Node {
         &self.hub
     }
 
-    pub fn broker(&self) -> &Arc<dyn Broker> {
-        &self.broker
+    pub fn engine(&self) -> &Arc<dyn Engine> {
+        &self.engine
     }
 
     pub fn verifier(&self) -> &TokenVerifier {
@@ -220,145 +207,103 @@ impl Node {
 
     // ---- presence ----
 
-    pub fn add_presence(&self, channel: &str, client_id: &str, info: ClientInfo) {
-        self.presence
-            .lock()
-            .entry(channel.to_string())
-            .or_default()
-            .insert(client_id.to_string(), info);
+    pub async fn add_presence(&self, channel: &str, client_id: &str, info: ClientInfo) {
+        if let Err(e) = self.engine.add_presence(channel, client_id, info).await {
+            tracing::warn!("add_presence({channel}): {e}");
+        }
     }
 
-    pub fn remove_presence(&self, channel: &str, client_id: &str) {
-        let mut p = self.presence.lock();
-        if let Some(chan) = p.get_mut(channel) {
-            chan.remove(client_id);
-            if chan.is_empty() {
-                p.remove(channel);
+    pub async fn remove_presence(&self, channel: &str, client_id: &str) {
+        if let Err(e) = self.engine.remove_presence(channel, client_id).await {
+            tracing::warn!("remove_presence({channel}): {e}");
+        }
+    }
+
+    pub async fn presence(&self, channel: &str) -> HashMap<String, ClientInfo> {
+        match self.engine.presence(channel).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("presence({channel}): {e}");
+                HashMap::new()
             }
         }
     }
 
-    pub fn presence(&self, channel: &str) -> HashMap<String, ClientInfo> {
-        self.presence
-            .lock()
-            .get(channel)
-            .cloned()
-            .unwrap_or_default()
-    }
-
     /// (num_clients, num_users): total entries and distinct user ids.
-    pub fn presence_stats(&self, channel: &str) -> (u32, u32) {
-        let p = self.presence.lock();
-        let Some(chan) = p.get(channel) else {
-            return (0, 0);
-        };
-        let num_clients = chan.len() as u32;
-        let users: std::collections::HashSet<&str> =
-            chan.values().map(|ci| ci.user.as_str()).collect();
-        (num_clients, users.len() as u32)
+    pub async fn presence_stats(&self, channel: &str) -> (u32, u32) {
+        match self.engine.presence_stats(channel).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("presence_stats({channel}): {e}");
+                (0, 0)
+            }
+        }
     }
 
     // ---- join / leave ----
 
-    pub fn publish_join(&self, channel: &str, info: ClientInfo) {
-        deliver_push(&self.hub, channel, PushType::Join, &Join { info });
+    pub async fn publish_join(&self, channel: &str, info: ClientInfo) {
+        if let Err(e) = self.engine.publish_join(channel, info).await {
+            tracing::warn!("publish_join({channel}): {e}");
+        }
     }
 
-    pub fn publish_leave(&self, channel: &str, info: ClientInfo) {
-        deliver_push(&self.hub, channel, PushType::Leave, &Leave { info });
+    pub async fn publish_leave(&self, channel: &str, info: ClientInfo) {
+        if let Err(e) = self.engine.publish_leave(channel, info).await {
+            tracing::warn!("publish_leave({channel}): {e}");
+        }
     }
 
     // ---- publish + history ----
 
-    /// Publish to a channel: append to history (when enabled) assigning an
-    /// offset, then fan out the live publication (offset zeroed on the wire,
-    /// matching Go hub.go).
-    pub fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
-        if let Some(opts) = self.namespaces.channel_options(channel) {
-            if opts.history_enabled() {
-                self.add_to_history(
-                    channel,
-                    data,
-                    info.clone(),
-                    opts.history_size,
-                    opts.history_lifetime,
-                );
+    /// Publish to a channel: the engine appends to history (when enabled for the
+    /// channel) assigning an offset, then fans out the live publication.
+    pub async fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
+        let opts = self
+            .namespaces
+            .channel_options(channel)
+            .map(|o| o.publish_options())
+            .unwrap_or_default();
+        if let Err(e) = self.engine.publish(channel, data, info, opts).await {
+            tracing::warn!("publish({channel}): {e}");
+        }
+    }
+
+    /// Full history (all retained publications) + current top position.
+    pub async fn history(&self, channel: &str) -> (Vec<Publication>, StreamPosition) {
+        match self.engine.history(channel).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("history({channel}): {e}");
+                (Vec::new(), StreamPosition::default())
             }
         }
-        let _ = self.broker.publish(channel, data, info);
-    }
-
-    fn add_to_history(
-        &self,
-        channel: &str,
-        data: &[u8],
-        info: Option<ClientInfo>,
-        size: usize,
-        lifetime_secs: u64,
-    ) {
-        let mut hist = self.history.lock();
-        let lifetime = lifetime_secs as i64;
-        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
-        stream.offset += 1;
-        let publication = Publication {
-            data: Some(Raw::from_bytes(data)),
-            info,
-            offset: stream.offset,
-            ..Default::default()
-        };
-        stream.pubs.push_back(publication);
-        while stream.pubs.len() > size {
-            stream.pubs.pop_front();
-        }
-        stream.expire_at = now_unix() + lifetime;
-    }
-
-    /// Full history (all retained publications) + current top position. Creates
-    /// an (empty) stream on first access so the epoch is stable thereafter.
-    pub fn history(&self, channel: &str) -> (Vec<Publication>, StreamPosition) {
-        let mut hist = self.history.lock();
-        if hist
-            .get(channel)
-            .map(|s| now_unix() > s.expire_at)
-            .unwrap_or(false)
-        {
-            hist.remove(channel);
-        }
-        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
-        (stream.pubs.iter().cloned().collect(), stream.position())
     }
 
     /// Publications after `since_offset` + current top position (recovery).
-    pub fn history_since(
+    pub async fn history_since(
         &self,
         channel: &str,
         since_offset: u64,
         since_epoch: &str,
     ) -> (Vec<Publication>, StreamPosition) {
-        let mut hist = self.history.lock();
-        if hist
-            .get(channel)
-            .map(|s| now_unix() > s.expire_at)
-            .unwrap_or(false)
+        match self
+            .engine
+            .history_since(channel, since_offset, since_epoch)
+            .await
         {
-            hist.remove(channel);
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("history_since({channel}): {e}");
+                (Vec::new(), StreamPosition::default())
+            }
         }
-        let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
-        let top = stream.position();
-        if top.offset == since_offset && top.epoch == since_epoch {
-            return (Vec::new(), top);
-        }
-        let pubs = stream
-            .pubs
-            .iter()
-            .filter(|p| p.offset > since_offset)
-            .cloned()
-            .collect();
-        (pubs, top)
     }
 
-    pub fn remove_history(&self, channel: &str) {
-        self.history.lock().remove(channel);
+    pub async fn remove_history(&self, channel: &str) {
+        if let Err(e) = self.engine.remove_history(channel).await {
+            tracing::warn!("remove_history({channel}): {e}");
+        }
     }
 
     /// Create a per-connection client bound to this node, writing to `tx`.
@@ -372,14 +317,27 @@ impl Node {
     }
 }
 
-/// Route a client/API publication into local fan-out as a Publication push.
-fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<ClientInfo>) {
-    let publication = Publication {
-        data: Some(Raw::from_bytes(data)),
-        info,
-        ..Default::default()
-    };
-    deliver_push(hub, channel, PushType::Publication, &publication);
+/// Build the route callback that delivers engine [`NodeMessage`]s to this node's
+/// local subscribers. Both the memory and Redis engines are constructed with it.
+pub fn make_route(hub: &Arc<Hub>) -> RouteFn {
+    let hub = hub.clone();
+    Arc::new(move |msg| route_message(&hub, msg))
+}
+
+/// Turn a [`NodeMessage`] into the matching push and fan it out locally.
+fn route_message(hub: &Hub, msg: NodeMessage) {
+    match msg {
+        NodeMessage::Publication {
+            channel,
+            publication,
+        } => deliver_push(hub, &channel, PushType::Publication, &publication),
+        NodeMessage::Join { channel, info } => {
+            deliver_push(hub, &channel, PushType::Join, &Join { info })
+        }
+        NodeMessage::Leave { channel, info } => {
+            deliver_push(hub, &channel, PushType::Leave, &Leave { info })
+        }
+    }
 }
 
 /// Encode `inner` (a Publication/Join/Leave) into a push frame once per protocol
@@ -456,13 +414,15 @@ mod tests {
 
         let (tx_b, mut rx_b) = mpsc::channel::<Out>(16);
         let mut sub = node.new_client(tx_b, ProtocolType::Json);
-        sub.handle_command(&connect_cmd(1));
-        sub.handle_command(&subscribe_cmd(2, "news"));
+        sub.handle_command(&connect_cmd(1)).await;
+        sub.handle_command(&subscribe_cmd(2, "news")).await;
 
         let (tx_a, _rx_a) = mpsc::channel::<Out>(16);
         let mut pubr = node.new_client(tx_a, ProtocolType::Json);
-        pubr.handle_command(&connect_cmd(1));
-        let pub_replies = pubr.handle_command(&publish_cmd(2, "news", r#"{"msg":"hi"}"#));
+        pubr.handle_command(&connect_cmd(1)).await;
+        let pub_replies = pubr
+            .handle_command(&publish_cmd(2, "news", r#"{"msg":"hi"}"#))
+            .await;
         assert!(pub_replies.replies[0].error.is_none());
 
         let out = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
@@ -487,9 +447,9 @@ mod tests {
         let node = Node::new();
         let (tx, _rx) = mpsc::channel::<Out>(16);
         let mut c = node.new_client(tx, ProtocolType::Json);
-        let r1 = c.handle_command(&connect_cmd(1));
+        let r1 = c.handle_command(&connect_cmd(1)).await;
         assert!(r1.replies[0].error.is_none());
-        let r2 = c.handle_command(&connect_cmd(2));
+        let r2 = c.handle_command(&connect_cmd(2)).await;
         assert_eq!(r2.replies[0].error.as_ref().unwrap().code, 107); // bad request
     }
 
@@ -498,7 +458,7 @@ mod tests {
         let node = Node::new();
         let (tx, _rx) = mpsc::channel::<Out>(16);
         let mut c = node.new_client(tx, ProtocolType::Json);
-        c.handle_command(&connect_cmd(1));
+        c.handle_command(&connect_cmd(1)).await;
 
         let send = Command {
             id: 0,
@@ -506,7 +466,7 @@ mod tests {
             params: Some(raw(r#"{"data":{}}"#.into())),
         };
         assert!(
-            c.handle_command(&send).replies.is_empty(),
+            c.handle_command(&send).await.replies.is_empty(),
             "SEND must produce no reply"
         );
 
@@ -515,7 +475,7 @@ mod tests {
             method: MethodType::Presence,
             params: Some(raw(r#"{"channel":"x"}"#.into())),
         };
-        let r = c.handle_command(&presence);
+        let r = c.handle_command(&presence).await;
         assert_eq!(r.replies[0].error.as_ref().unwrap().code, 108); // not available
     }
 }

@@ -105,7 +105,7 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
         let mut replies = Vec::new();
         let mut disconnect = None;
         for c in &cmds {
-            let outcome = client.handle_command(c);
+            let outcome = client.handle_command(c).await;
             replies.extend(outcome.replies);
             if let Some(d) = outcome.disconnect {
                 disconnect = Some(d);
@@ -134,7 +134,7 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     // Publish Leave + clear presence for subscribed channels and unregister from
     // the hub, then drop every sender so the writer drains any queued close frame
     // and finishes on its own.
-    client.on_disconnect();
+    client.on_disconnect().await;
     drop(client);
     drop(tx);
     let _ = writer.await;

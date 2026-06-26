@@ -90,7 +90,7 @@ impl Client {
     }
 
     /// Dispatch one command. Returns replies and/or a disconnect.
-    pub fn handle_command(&mut self, cmd: &Command) -> CommandOutcome {
+    pub async fn handle_command(&mut self, cmd: &Command) -> CommandOutcome {
         // CONNECT must be the first command; otherwise close the connection
         // (Go centrifuge sends DisconnectBadRequest).
         if !self.authenticated && cmd.method != MethodType::Connect {
@@ -100,9 +100,9 @@ impl Client {
             // CONNECT may itself decide to disconnect (invalid token), so it
             // returns its own outcome.
             MethodType::Connect => self.on_connect(cmd),
-            MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd)),
-            MethodType::Publish => CommandOutcome::replies(self.on_publish(cmd)),
-            MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd)),
+            MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd).await),
+            MethodType::Publish => CommandOutcome::replies(self.on_publish(cmd).await),
+            MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd).await),
             MethodType::Ping => {
                 CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PingResult {})])
             }
@@ -114,9 +114,11 @@ impl Client {
             MethodType::Rpc => {
                 CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())])
             }
-            MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd)),
-            MethodType::PresenceStats => CommandOutcome::replies(self.on_presence_stats(cmd)),
-            MethodType::History => CommandOutcome::replies(self.on_history(cmd)),
+            MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd).await),
+            MethodType::PresenceStats => {
+                CommandOutcome::replies(self.on_presence_stats(cmd).await)
+            }
+            MethodType::History => CommandOutcome::replies(self.on_history(cmd).await),
             // SUB_REFRESH lands with private channels (M6).
             MethodType::SubRefresh => {
                 CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())])
@@ -184,7 +186,7 @@ impl Client {
         CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
 
-    fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: SubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
@@ -233,11 +235,12 @@ impl Client {
             }
         }
         self.node.hub().subscribe(&self.id, &req.channel);
-        let _ = self.node.broker().subscribe(&req.channel);
+        let _ = self.node.engine().subscribe(&req.channel).await;
 
         if presence {
             self.node
-                .add_presence(&req.channel, &self.id, self.client_info());
+                .add_presence(&req.channel, &self.id, self.client_info())
+                .await;
         }
         if !self.subscriptions.iter().any(|c| c == &req.channel) {
             self.subscriptions.push(req.channel.clone());
@@ -257,7 +260,8 @@ impl Client {
                 };
                 let (mut pubs, top) = self
                     .node
-                    .history_since(&req.channel, cmd_offset, &req.epoch);
+                    .history_since(&req.channel, cmd_offset, &req.epoch)
+                    .await;
                 let next = cmd_offset + 1;
                 result.recovered = match pubs.first() {
                     Some(first) => first.offset == next && top.epoch == req.epoch,
@@ -278,7 +282,7 @@ impl Client {
                 }
                 result.publications = pubs;
             } else {
-                let (_pubs, top) = self.node.history(&req.channel);
+                let (_pubs, top) = self.node.history(&req.channel).await;
                 result.epoch = top.epoch;
                 encode_position(&mut result, top.offset, use_seq_gen);
             }
@@ -288,12 +292,14 @@ impl Client {
         // Join is published after the subscribe reply; the joiner is now a
         // subscriber (matches centrifuge ordering).
         if join_leave {
-            self.node.publish_join(&req.channel, self.client_info());
+            self.node
+                .publish_join(&req.channel, self.client_info())
+                .await;
         }
         vec![reply]
     }
 
-    fn on_history(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_history(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: HistoryRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
@@ -308,7 +314,7 @@ impl Client {
         if !self.is_subscribed(&req.channel) {
             return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
-        let (mut publications, _top) = self.node.history(&req.channel);
+        let (mut publications, _top) = self.node.history(&req.channel).await;
         if self.node.use_seq_gen() {
             for p in &mut publications {
                 let (s, g) = unpack_offset(p.offset);
@@ -320,7 +326,7 @@ impl Client {
         vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
-    fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: PublishRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
@@ -332,38 +338,38 @@ impl Client {
         // A client-initiated publication carries the publisher's ClientInfo,
         // matching Go centrifuge behavior.
         let info = self.client_info();
-        self.node.publish(&req.channel, data, Some(info));
+        self.node.publish(&req.channel, data, Some(info)).await;
         vec![ok_reply(self.proto, cmd.id, &PublishResult {})]
     }
 
-    fn on_unsubscribe(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_unsubscribe(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: UnsubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
         if !req.channel.is_empty() {
-            self.unsubscribe_channel(&req.channel);
+            self.unsubscribe_channel(&req.channel).await;
         }
         vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})]
     }
 
-    fn unsubscribe_channel(&mut self, channel: &str) {
+    async fn unsubscribe_channel(&mut self, channel: &str) {
         self.node.hub().unsubscribe(&self.id, channel);
-        let _ = self.node.broker().unsubscribe(channel);
+        let _ = self.node.engine().unsubscribe(channel).await;
         let (presence, join_leave) = match self.node.channel_options(channel) {
             Some(o) => (o.presence, o.join_leave),
             None => (false, false),
         };
         if presence {
-            self.node.remove_presence(channel, &self.id);
+            self.node.remove_presence(channel, &self.id).await;
         }
         if join_leave {
-            self.node.publish_leave(channel, self.client_info());
+            self.node.publish_leave(channel, self.client_info()).await;
         }
         self.subscriptions.retain(|c| c != channel);
     }
 
-    fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: PresenceRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
@@ -379,12 +385,12 @@ impl Client {
             return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
         let result = PresenceResult {
-            presence: self.node.presence(&req.channel),
+            presence: self.node.presence(&req.channel).await,
         };
         vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
-    fn on_presence_stats(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_presence_stats(&mut self, cmd: &Command) -> Vec<Reply> {
         let req: PresenceStatsRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
@@ -399,7 +405,7 @@ impl Client {
         if !self.is_subscribed(&req.channel) {
             return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
-        let (num_clients, num_users) = self.node.presence_stats(&req.channel);
+        let (num_clients, num_users) = self.node.presence_stats(&req.channel).await;
         let result = PresenceStatsResult {
             num_clients,
             num_users,
@@ -409,7 +415,7 @@ impl Client {
 
     /// Called when the connection closes: publish Leave + clear presence for all
     /// subscribed channels, then unregister from the hub.
-    pub fn on_disconnect(&mut self) {
+    pub async fn on_disconnect(&mut self) {
         let channels = std::mem::take(&mut self.subscriptions);
         for ch in &channels {
             let (presence, join_leave) = match self.node.channel_options(ch) {
@@ -417,10 +423,10 @@ impl Client {
                 None => continue,
             };
             if presence {
-                self.node.remove_presence(ch, &self.id);
+                self.node.remove_presence(ch, &self.id).await;
             }
             if join_leave {
-                self.node.publish_leave(ch, self.client_info());
+                self.node.publish_leave(ch, self.client_info()).await;
             }
         }
         self.node.remove(&self.id);

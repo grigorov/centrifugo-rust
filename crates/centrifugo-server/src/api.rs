@@ -147,7 +147,7 @@ pub async fn api_handler(
             Ok(c) => c,
             Err(_) => return (StatusCode::BAD_REQUEST, "Bad Request").into_response(),
         };
-        let reply = dispatch(&node, cmd);
+        let reply = dispatch(&node, cmd).await;
         buf.push_str(&serde_json::to_string(&reply).unwrap_or_else(|_| "{}".into()));
         buf.push('\n');
     }
@@ -222,7 +222,7 @@ fn err(id: u32, code: u32, message: &str) -> ApiReply {
     }
 }
 
-fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
+async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
     let id = cmd.id;
     let params = cmd.params;
     macro_rules! req {
@@ -241,7 +241,7 @@ fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                 .as_ref()
                 .map(|d| d.get().as_bytes())
                 .unwrap_or(b"null");
-            node.publish(&r.channel, data, None);
+            node.publish(&r.channel, data, None).await;
             void(id)
         }
         "broadcast" => {
@@ -252,7 +252,7 @@ fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                 .map(|d| d.get().as_bytes())
                 .unwrap_or(b"null");
             for ch in &r.channels {
-                node.publish(ch, data, None);
+                node.publish(ch, data, None).await;
             }
             void(id)
         }
@@ -261,13 +261,13 @@ fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
             ok(
                 id,
                 &PresenceResult {
-                    presence: node.presence(&r.channel),
+                    presence: node.presence(&r.channel).await,
                 },
             )
         }
         "presence_stats" => {
             let r: ChannelReq = req!(ChannelReq);
-            let (num_clients, num_users) = node.presence_stats(&r.channel);
+            let (num_clients, num_users) = node.presence_stats(&r.channel).await;
             ok(
                 id,
                 &PresenceStatsResult {
@@ -278,7 +278,7 @@ fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "history" => {
             let r: ChannelReq = req!(ChannelReq);
-            let (pubs, _top) = node.history(&r.channel);
+            let (pubs, _top) = node.history(&r.channel).await;
             let publications = pubs
                 .into_iter()
                 .map(|p| ApiPublication {
@@ -291,7 +291,7 @@ fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "history_remove" => {
             let r: ChannelReq = req!(ChannelReq);
-            node.remove_history(&r.channel);
+            node.remove_history(&r.channel).await;
             void(id)
         }
         "channels" => ok(

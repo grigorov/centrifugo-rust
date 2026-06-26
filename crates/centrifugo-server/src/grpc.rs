@@ -59,7 +59,9 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::PublishRequest>,
     ) -> Result<Response<pb::PublishResponse>, Status> {
         let req = request.into_inner();
-        self.node.publish(&req.channel, &pub_data(req.data), None);
+        self.node
+            .publish(&req.channel, &pub_data(req.data), None)
+            .await;
         Ok(Response::new(pb::PublishResponse {
             error: None,
             result: None,
@@ -73,7 +75,7 @@ impl Centrifugo for GrpcApi {
         let req = request.into_inner();
         let data = pub_data(req.data);
         for ch in &req.channels {
-            self.node.publish(ch, &data, None);
+            self.node.publish(ch, &data, None).await;
         }
         Ok(Response::new(pb::BroadcastResponse {
             error: None,
@@ -112,6 +114,7 @@ impl Centrifugo for GrpcApi {
         let presence = self
             .node
             .presence(&req.channel)
+            .await
             .into_iter()
             .map(|(k, v)| (k, to_pb_client_info(v)))
             .collect();
@@ -126,7 +129,7 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::PresenceStatsRequest>,
     ) -> Result<Response<pb::PresenceStatsResponse>, Status> {
         let req = request.into_inner();
-        let (num_clients, num_users) = self.node.presence_stats(&req.channel);
+        let (num_clients, num_users) = self.node.presence_stats(&req.channel).await;
         Ok(Response::new(pb::PresenceStatsResponse {
             error: None,
             result: Some(pb::PresenceStatsResult {
@@ -141,7 +144,7 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::HistoryRequest>,
     ) -> Result<Response<pb::HistoryResponse>, Status> {
         let req = request.into_inner();
-        let (pubs, _top) = self.node.history(&req.channel);
+        let (pubs, _top) = self.node.history(&req.channel).await;
         let publications = pubs.into_iter().map(to_pb_publication).collect();
         Ok(Response::new(pb::HistoryResponse {
             error: None,
@@ -154,7 +157,7 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::HistoryRemoveRequest>,
     ) -> Result<Response<pb::HistoryRemoveResponse>, Status> {
         let req = request.into_inner();
-        self.node.remove_history(&req.channel);
+        self.node.remove_history(&req.channel).await;
         Ok(Response::new(pb::HistoryRemoveResponse {
             error: None,
             result: None,
