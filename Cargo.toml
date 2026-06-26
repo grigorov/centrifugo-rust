@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/centrifugo-protocol",
+    "crates/centrifugo-core",
+    "crates/centrifugo-server",
+    "conformance",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.7", features = ["ws"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+futures-util = "0.3"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
