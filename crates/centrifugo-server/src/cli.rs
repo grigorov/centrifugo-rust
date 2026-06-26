@@ -54,4 +54,10 @@ pub struct ServeArgs {
     /// Offer (re)subscribe recovery on channels.
     #[arg(long = "history_recover")]
     pub history_recover: bool,
+    /// Server HTTP API key for apikey auth.
+    #[arg(long = "api_key", default_value = "")]
+    pub api_key: String,
+    /// Disable HTTP API auth.
+    #[arg(long = "api_insecure")]
+    pub api_insecure: bool,
 }

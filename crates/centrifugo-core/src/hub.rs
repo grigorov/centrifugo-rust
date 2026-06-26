@@ -136,6 +136,23 @@ impl Hub {
     pub fn num_clients(&self) -> usize {
         self.conns.read().len()
     }
+
+    pub fn num_users(&self) -> usize {
+        self.users.read().len()
+    }
+
+    /// All channels with at least one subscriber.
+    pub fn channels(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for shard in &self.shards {
+            out.extend(shard.read().subs.keys().cloned());
+        }
+        out
+    }
+
+    pub fn num_channels(&self) -> usize {
+        self.shards.iter().map(|s| s.read().subs.len()).sum()
+    }
 }
 
 #[cfg(test)]

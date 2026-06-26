@@ -26,6 +26,10 @@ pub struct Config {
     pub history_lifetime: u64,
     /// Offer (re)subscribe recovery on channels.
     pub history_recover: bool,
+    /// Server HTTP API key (apikey auth). Empty + !api_insecure => all 401.
+    pub api_key: String,
+    /// Disable HTTP API auth.
+    pub api_insecure: bool,
 }
 
 impl Config {

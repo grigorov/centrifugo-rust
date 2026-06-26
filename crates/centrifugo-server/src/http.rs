@@ -3,17 +3,20 @@
 
 use std::sync::Arc;
 
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::routing::{get, post};
+use axum::{Extension, Json, Router};
 use centrifugo_core::Node;
 use serde_json::json;
 
+use crate::api::{self, ApiAuth};
 use crate::ws;
 
-pub fn router(node: Arc<Node>) -> Router {
+pub fn router(node: Arc<Node>, api_auth: ApiAuth) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/connection/websocket", get(ws::ws_handler))
+        .route("/api", post(api::api_handler))
+        .layer(Extension(api_auth))
         .with_state(node)
 }
 

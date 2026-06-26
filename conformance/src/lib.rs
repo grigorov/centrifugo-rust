@@ -101,6 +101,33 @@ pub(crate) fn pick_port() -> u16 {
     l.local_addr().unwrap().port()
 }
 
+/// POST a body to `<http_base>/api` with an apikey header; return the first
+/// JSON reply line.
+pub async fn api_post(http_base: &str, api_key: &str, body: &str) -> serde_json::Value {
+    let resp = reqwest::Client::new()
+        .post(format!("{http_base}/api"))
+        .header("Authorization", format!("apikey {api_key}"))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let text = resp.text().await.unwrap();
+    serde_json::from_str(text.lines().next().unwrap_or("{}")).expect("valid api json reply")
+}
+
+/// POST to `/api` and return the HTTP status code.
+pub async fn api_status(http_base: &str, api_key: &str, body: &str) -> u16 {
+    reqwest::Client::new()
+        .post(format!("{http_base}/api"))
+        .header("Authorization", format!("apikey {api_key}"))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
 /// Reduce a JSON value to its structural "shape": object keys (sorted) and value
 /// *types*, discarding leaf values. Lets differential tests compare structure
 /// against the Go oracle while ignoring volatile values (client ids, epochs).

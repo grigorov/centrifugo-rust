@@ -1,5 +1,6 @@
 //! Centrifugo (Rust) binary entrypoint.
 
+mod api;
 mod cli;
 mod config;
 mod http;
@@ -52,6 +53,8 @@ async fn main() -> anyhow::Result<()> {
                 history_size: args.history_size,
                 history_lifetime: args.history_lifetime,
                 history_recover: args.history_recover,
+                api_key: args.api_key,
+                api_insecure: args.api_insecure,
             };
             let rsa_pem = read_pem_opt(&cfg.token_rsa_public_key)?;
             let ecdsa_pem = read_pem_opt(&cfg.token_ecdsa_public_key)?;
@@ -70,8 +73,13 @@ async fn main() -> anyhow::Result<()> {
                 history_recover: cfg.history_recover,
             };
             let node = Node::new_with(Arc::new(verifier), cfg.client_insecure, opts);
-            let app = http::router(Arc::clone(&node));
-            http::serve(cfg.socket_addr(), app).await
+            let addr = cfg.socket_addr();
+            let api_auth = api::ApiAuth {
+                key: cfg.api_key,
+                insecure: cfg.api_insecure,
+            };
+            let app = http::router(Arc::clone(&node), api_auth);
+            http::serve(addr, app).await
         }
     }
 }
