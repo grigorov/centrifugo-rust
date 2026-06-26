@@ -179,3 +179,102 @@ impl WsJsonClient {
         }
     }
 }
+
+// ---- Protobuf WS client ----
+
+use centrifugo_protocol::codec::{
+    decode_params, decode_replies, encode_commands, encode_result, ProtocolType,
+};
+use centrifugo_protocol::messages::{
+    ConnectRequest, ConnectResult, Publication, PublishRequest, SubscribeRequest,
+};
+use centrifugo_protocol::{pb, Command as ProtoCommand, MethodType, Raw, Reply};
+use prost::Message as _;
+
+/// A protobuf WebSocket client (uvarint-framed, Binary frames). Connect via a
+/// URL carrying `?format=protobuf`.
+pub struct PbWsClient {
+    ws: WsStream,
+}
+
+impl PbWsClient {
+    pub async fn connect(url: &str) -> Self {
+        let (ws, _resp) = connect_async(url).await.expect("pb ws connect");
+        PbWsClient { ws }
+    }
+
+    async fn send(&mut self, cmd: ProtoCommand) {
+        let frame = encode_commands(ProtocolType::Protobuf, &[cmd]).unwrap();
+        self.ws.send(Message::Binary(frame)).await.unwrap();
+    }
+
+    async fn next_reply(&mut self) -> Reply {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(3), self.ws.next()).await {
+                Ok(Some(Ok(Message::Binary(b)))) => {
+                    if let Some(r) = decode_replies(ProtocolType::Protobuf, &b)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                    {
+                        return r;
+                    }
+                }
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("pb ws closed/timeout: {other:?}"),
+            }
+        }
+    }
+
+    pub async fn connect_command(&mut self) -> ConnectResult {
+        let params = encode_result(ProtocolType::Protobuf, &ConnectRequest::default()).unwrap();
+        self.send(ProtoCommand {
+            id: 1,
+            method: MethodType::Connect,
+            params: Some(params),
+        })
+        .await;
+        let r = self.next_reply().await;
+        decode_params::<ConnectResult>(ProtocolType::Protobuf, &r.result).unwrap()
+    }
+
+    pub async fn subscribe(&mut self, id: u32, channel: &str) -> Reply {
+        let req = SubscribeRequest {
+            channel: channel.into(),
+            ..Default::default()
+        };
+        let params = encode_result(ProtocolType::Protobuf, &req).unwrap();
+        self.send(ProtoCommand {
+            id,
+            method: MethodType::Subscribe,
+            params: Some(params),
+        })
+        .await;
+        self.next_reply().await
+    }
+
+    pub async fn publish(&mut self, id: u32, channel: &str, data: &[u8]) -> Reply {
+        let req = PublishRequest {
+            channel: channel.into(),
+            data: Some(Raw::from_bytes(data)),
+        };
+        let params = encode_result(ProtocolType::Protobuf, &req).unwrap();
+        self.send(ProtoCommand {
+            id,
+            method: MethodType::Publish,
+            params: Some(params),
+        })
+        .await;
+        self.next_reply().await
+    }
+
+    /// Read the next push frame and decode its Publication.
+    pub async fn next_publication(&mut self) -> Publication {
+        let r = self.next_reply().await;
+        assert_eq!(r.id, 0, "push must have id==0");
+        let result = r.result.expect("push carries a result");
+        let push = pb::Push::decode(result.as_bytes()).expect("decode pb Push");
+        let pubn = pb::Publication::decode(&push.data[..]).expect("decode pb Publication");
+        pubn.into()
+    }
+}

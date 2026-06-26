@@ -8,16 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use centrifugo_protocol::ProtocolType;
 use parking_lot::RwLock;
 use tokio::sync::mpsc::Sender;
 
 pub type ClientId = String;
 
-/// A cheap, clonable handle to a connection's writer queue.
+/// A cheap, clonable handle to a connection's writer queue. `proto` selects which
+/// pre-encoded push frame (JSON or protobuf) the broadcaster delivers.
 #[derive(Clone)]
 pub struct ClientHandle {
     pub id: ClientId,
     pub user: String,
+    pub proto: ProtocolType,
     pub tx: Sender<Vec<u8>>,
 }
 
@@ -138,6 +141,7 @@ mod tests {
             ClientHandle {
                 id: id.into(),
                 user: user.into(),
+                proto: ProtocolType::Json,
                 tx,
             },
             rx,

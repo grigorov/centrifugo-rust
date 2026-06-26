@@ -5,11 +5,12 @@
 
 use std::sync::Arc;
 
+use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
     ClientInfo, ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest,
     SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
-use centrifugo_protocol::{Command, Error, MethodType, Raw, Reply};
+use centrifugo_protocol::{Command, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
@@ -21,16 +22,18 @@ use crate::node::Node;
 pub struct Client {
     pub id: ClientId,
     pub user: String,
+    proto: ProtocolType,
     authenticated: bool,
     node: Arc<Node>,
     tx: Sender<Vec<u8>>,
 }
 
 impl Client {
-    pub fn new(node: Arc<Node>, tx: Sender<Vec<u8>>) -> Self {
+    pub fn new(node: Arc<Node>, tx: Sender<Vec<u8>>, proto: ProtocolType) -> Self {
         Client {
             id: String::new(),
             user: String::new(),
+            proto,
             authenticated: false,
             node,
             tx,
@@ -48,7 +51,7 @@ impl Client {
             MethodType::Subscribe => self.on_subscribe(cmd),
             MethodType::Publish => self.on_publish(cmd),
             MethodType::Unsubscribe => self.on_unsubscribe(cmd),
-            MethodType::Ping => vec![ok_reply(cmd.id, &PingResult {})],
+            MethodType::Ping => vec![ok_reply(self.proto, cmd.id, &PingResult {})],
             // Remaining methods land in later milestones.
             _ => vec![Reply::err(cmd.id, Error::method_not_found())],
         }
@@ -65,6 +68,7 @@ impl Client {
         self.node.hub().add(ClientHandle {
             id: self.id.clone(),
             user: self.user.clone(),
+            proto: self.proto,
             tx: self.tx.clone(),
         });
         let result = ConnectResult {
@@ -72,11 +76,11 @@ impl Client {
             version: String::new(),
             ..Default::default()
         };
-        vec![ok_reply(cmd.id, &result)]
+        vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
     fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {
-        let req: SubscribeRequest = match parse_params(&cmd.params) {
+        let req: SubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
@@ -85,11 +89,11 @@ impl Client {
         }
         self.node.hub().subscribe(&self.id, &req.channel);
         let _ = self.node.broker().subscribe(&req.channel);
-        vec![ok_reply(cmd.id, &SubscribeResult::default())]
+        vec![ok_reply(self.proto, cmd.id, &SubscribeResult::default())]
     }
 
     fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
-        let req: PublishRequest = match parse_params(&cmd.params) {
+        let req: PublishRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
@@ -108,11 +112,11 @@ impl Client {
         if let Err(_e) = self.node.broker().publish(&req.channel, data, Some(info)) {
             return vec![Reply::err(cmd.id, Error::internal())];
         }
-        vec![ok_reply(cmd.id, &PublishResult {})]
+        vec![ok_reply(self.proto, cmd.id, &PublishResult {})]
     }
 
     fn on_unsubscribe(&mut self, cmd: &Command) -> Vec<Reply> {
-        let req: UnsubscribeRequest = match parse_params(&cmd.params) {
+        let req: UnsubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
@@ -120,20 +124,24 @@ impl Client {
             self.node.hub().unsubscribe(&self.id, &req.channel);
             let _ = self.node.broker().unsubscribe(&req.channel);
         }
-        vec![ok_reply(cmd.id, &UnsubscribeResult {})]
+        vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})]
     }
 }
 
-/// Parse a typed request from optional inline-raw params. Missing params → default.
-fn parse_params<T: DeserializeOwned + Default>(params: &Option<Raw>) -> Result<T, Error> {
-    match params {
-        None => Ok(T::default()),
-        Some(raw) => serde_json::from_slice(raw.as_bytes()).map_err(|_| Error::bad_request()),
-    }
+/// Parse a typed request from optional params, decoding in the connection's
+/// protocol. Missing params → default.
+fn parse_params<T: DeserializeOwned + Default + WireType>(
+    proto: ProtocolType,
+    params: &Option<Raw>,
+) -> Result<T, Error> {
+    codec::decode_params(proto, params).map_err(|_| Error::bad_request())
 }
 
-/// Build an ok reply, falling back to an internal error if serialization fails
-/// (which it should not for our result types).
-fn ok_reply<T: Serialize>(id: u32, value: &T) -> Reply {
-    Reply::ok_value(id, value).unwrap_or_else(|_| Reply::err(id, Error::internal()))
+/// Build an ok reply, encoding the result in the connection's protocol (JSON or
+/// protobuf). Falls back to an internal error if encoding fails (it should not).
+fn ok_reply<T: Serialize + WireType>(proto: ProtocolType, id: u32, value: &T) -> Reply {
+    match codec::encode_result(proto, value) {
+        Ok(raw) => Reply::ok(id, raw),
+        Err(_) => Reply::err(id, Error::internal()),
+    }
 }

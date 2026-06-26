@@ -3,7 +3,9 @@
 //!
 //! Authority for all wire bytes: `docs/reference/protocol-v0.3.4-wire-format.md`.
 
+pub mod codec;
 pub mod command;
+pub mod convert;
 pub mod disconnect;
 pub mod error;
 pub mod json;
@@ -12,6 +14,7 @@ pub mod method;
 pub mod pb;
 pub mod raw;
 
+pub use codec::ProtocolType;
 pub use command::{Command, Push, Reply};
 pub use disconnect::Disconnect;
 pub use error::Error;

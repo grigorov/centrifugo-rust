@@ -6,10 +6,9 @@
 
 use std::sync::Arc;
 
-use centrifugo_protocol::command::encode_raw;
-use centrifugo_protocol::json::encode_reply;
+use centrifugo_protocol::codec::{self, ProtocolType};
 use centrifugo_protocol::messages::{ClientInfo, Publication};
-use centrifugo_protocol::{Push, PushType, Raw, Reply};
+use centrifugo_protocol::{Push, PushType, Raw};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
@@ -44,8 +43,8 @@ impl Node {
     }
 
     /// Create a per-connection client bound to this node, writing frames to `tx`.
-    pub fn new_client(self: &Arc<Self>, tx: Sender<Vec<u8>>) -> Client {
-        Client::new(self.clone(), tx)
+    pub fn new_client(self: &Arc<Self>, tx: Sender<Vec<u8>>, proto: ProtocolType) -> Client {
+        Client::new(self.clone(), tx, proto)
     }
 
     /// Remove a connection (on socket close).
@@ -54,43 +53,51 @@ impl Node {
     }
 }
 
-/// Encode a publication push once and fan it out to all subscribers of `channel`.
+/// Encode a publication push once per protocol and fan it out to all subscribers
+/// of `channel`, sending each subscriber the frame matching its protocol.
 fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<ClientInfo>) {
     let publication = Publication {
         data: Some(Raw::from_bytes(data)),
         info,
         ..Default::default()
     };
-    let encoded_pub = match encode_raw(&publication) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let push = Push::new(PushType::Publication, channel, Some(encoded_pub));
-    let reply = match Reply::push(&push) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    let frame = match encode_reply(&reply) {
-        Ok(b) => b,
-        Err(_) => return,
-    };
+    // Encode once per protocol (lazily simple: build both; either may be unused).
+    let json_frame = make_push_frame(ProtocolType::Json, channel, &publication);
+    let pb_frame = make_push_frame(ProtocolType::Protobuf, channel, &publication);
 
     for handle in hub.subscribers(channel) {
-        match handle.tx.try_send(frame.clone()) {
+        let frame = match handle.proto {
+            ProtocolType::Json => &json_frame,
+            ProtocolType::Protobuf => &pb_frame,
+        };
+        let Some(bytes) = frame else { continue };
+        match handle.tx.try_send(bytes.clone()) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
                 // Slow or gone consumer: drop it so it cannot block the broadcaster.
-                // (Full DisconnectSlow close-frame semantics arrive in M2.)
+                // (Full DisconnectSlow close-frame semantics arrive in M2.5/M2.6.)
                 hub.remove(&handle.id);
             }
         }
     }
 }
 
+/// Build the full push frame (Reply with id==0 carrying the encoded Publication
+/// Push) for one protocol.
+fn make_push_frame(
+    proto: ProtocolType,
+    channel: &str,
+    publication: &Publication,
+) -> Option<Vec<u8>> {
+    let data = codec::encode_result(proto, publication).ok()?;
+    let push = Push::new(PushType::Publication, channel, Some(data));
+    codec::encode_push_frame(proto, &push).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use centrifugo_protocol::{Command, MethodType, Raw};
+    use centrifugo_protocol::{Command, MethodType, ProtocolType, Raw};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
@@ -124,12 +131,12 @@ mod tests {
         let node = Node::new();
 
         let (tx_b, mut rx_b) = mpsc::channel::<Vec<u8>>(16);
-        let mut sub = node.new_client(tx_b);
+        let mut sub = node.new_client(tx_b, ProtocolType::Json);
         sub.handle_command(&connect_cmd(1));
         sub.handle_command(&subscribe_cmd(2, "news"));
 
         let (tx_a, _rx_a) = mpsc::channel::<Vec<u8>>(16);
-        let mut pubr = node.new_client(tx_a);
+        let mut pubr = node.new_client(tx_a, ProtocolType::Json);
         pubr.handle_command(&connect_cmd(1));
         let pub_replies = pubr.handle_command(&publish_cmd(2, "news", r#"{"msg":"hi"}"#));
         assert!(pub_replies[0].error.is_none());
@@ -152,7 +159,7 @@ mod tests {
     async fn second_connect_is_rejected() {
         let node = Node::new();
         let (tx, _rx) = mpsc::channel::<Vec<u8>>(16);
-        let mut c = node.new_client(tx);
+        let mut c = node.new_client(tx, ProtocolType::Json);
         let r1 = c.handle_command(&connect_cmd(1));
         assert!(r1[0].error.is_none());
         let r2 = c.handle_command(&connect_cmd(2));

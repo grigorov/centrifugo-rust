@@ -30,6 +30,15 @@ impl MethodType {
         *self == MethodType::Connect
     }
 
+    /// Convert a protobuf `i32` enum value to a `MethodType`.
+    pub fn from_i32(n: i32) -> Option<Self> {
+        if n < 0 {
+            None
+        } else {
+            Self::from_u64(n as u64)
+        }
+    }
+
     fn from_u64(n: u64) -> Option<Self> {
         Some(match n {
             0 => Self::Connect,
@@ -115,6 +124,19 @@ impl PushType {
     /// PUBLICATION is the zero value; the `type` field is omitted when it equals this.
     pub fn is_default(&self) -> bool {
         *self == PushType::Publication
+    }
+
+    /// Convert a protobuf `i32` enum value to a `PushType`.
+    pub fn from_i32(n: i32) -> Option<Self> {
+        Some(match n {
+            0 => Self::Publication,
+            1 => Self::Join,
+            2 => Self::Leave,
+            3 => Self::Unsub,
+            4 => Self::Message,
+            5 => Self::Sub,
+            _ => return None,
+        })
     }
 }
 

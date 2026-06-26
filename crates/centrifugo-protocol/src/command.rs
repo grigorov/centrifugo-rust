@@ -12,7 +12,7 @@ fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub id: u32,
@@ -22,7 +22,7 @@ pub struct Command {
     pub params: Option<Raw>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reply {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub id: u32,
@@ -66,7 +66,7 @@ impl Reply {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Push {
     #[serde(default, skip_serializing_if = "PushType::is_default")]
     pub r#type: PushType,

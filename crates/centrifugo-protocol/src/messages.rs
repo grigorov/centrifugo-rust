@@ -1,6 +1,10 @@
-//! Request / Result payloads and inner objects (Publication, ClientInfo, Join,
-//! Leave, Sub, Unsub, Message). Field presence (`omitempty`) and JSON key names
-//! (snake_case where required) follow `docs/reference/protocol-v0.3.4-wire-format.md`.
+//! Request / Result payloads and inner objects (Publication, ClientInfo, …).
+//! Field presence (`omitempty`) and JSON key names (snake_case where required)
+//! follow `docs/reference/protocol-v0.3.4-wire-format.md`.
+//!
+//! Every type derives both `Serialize` and `Deserialize` (and `Default`) so it
+//! round-trips in either codec and can be produced by test clients. Fields carry
+//! `#[serde(default)]` so a reply that omits an `omitempty` field still decodes.
 //!
 //! Only the messages needed up to the current milestone are defined; the rest
 //! are added in their milestones.
@@ -21,97 +25,102 @@ fn is_zero_u64(n: &u64) -> bool {
 
 // ---- Connect ----
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConnectRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Raw>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ConnectResult {
+    #[serde(default)]
     pub client: String,
+    #[serde(default)]
     pub version: String,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub expires: bool,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub ttl: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Raw>,
 }
 
 // ---- Subscribe ----
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SubscribeRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub recover: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub offset: u64,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SubscribeResult {
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub expires: bool,
-    #[serde(skip_serializing_if = "is_zero_u32")]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub ttl: u32,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub recoverable: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub epoch: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publications: Vec<Publication>,
-    #[serde(skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub recovered: bool,
-    #[serde(skip_serializing_if = "is_zero_u64")]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub offset: u64,
 }
 
 // ---- Publish ----
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PublishRequest {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub channel: String,
+    #[serde(default)]
     pub data: Option<Raw>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PublishResult {}
 
 // ---- Unsubscribe ----
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeRequest {
     #[serde(default)]
     pub channel: String,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UnsubscribeResult {}
 
 // ---- Ping ----
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PingResult {}
 
 // ---- Inner objects ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientInfo {
+    #[serde(default)]
     pub user: String,
+    #[serde(default)]
     pub client: String,
     #[serde(rename = "conn_info", default, skip_serializing_if = "Option::is_none")]
     pub conn_info: Option<Raw>,
@@ -119,7 +128,7 @@ pub struct ClientInfo {
     pub chan_info: Option<Raw>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Publication {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub seq: u32,
@@ -128,6 +137,7 @@ pub struct Publication {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uid: String,
     /// No `omitempty`: serializes as `null` when `None`.
+    #[serde(default)]
     pub data: Option<Raw>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info: Option<ClientInfo>,
@@ -191,5 +201,13 @@ mod tests {
             serde_json::to_string(&ci).unwrap(),
             r#"{"user":"u","client":"c","conn_info":{"a":1}}"#
         );
+    }
+
+    #[test]
+    fn connect_result_decodes_from_partial_json() {
+        // a reply that omits omitempty fields still decodes
+        let r: ConnectResult = serde_json::from_str(r#"{"client":"x","version":"v"}"#).unwrap();
+        assert_eq!(r.client, "x");
+        assert!(!r.expires);
     }
 }
