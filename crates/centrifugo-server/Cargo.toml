@@ -14,6 +14,7 @@ centrifugo-core = { path = "../centrifugo-core" }
 centrifugo-auth = { path = "../centrifugo-auth" }
 centrifugo-grpc = { path = "../centrifugo-grpc" }
 centrifugo-redis = { path = "../centrifugo-redis" }
+async-trait = "0.1"
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
@@ -25,5 +26,6 @@ anyhow = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
 tonic = "0.12"
 prost = "0.13"

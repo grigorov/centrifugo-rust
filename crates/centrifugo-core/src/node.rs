@@ -22,6 +22,7 @@ use crate::client::Client;
 use crate::engine::{Engine, NodeMessage, PublishOptions, RouteFn};
 use crate::hub::{Hub, Out};
 use crate::memory::MemoryEngine;
+use crate::proxy::ConnectProxy;
 
 /// Channel options. Resolved per-channel from the namespace registry.
 #[derive(Debug, Clone, Default)]
@@ -128,6 +129,9 @@ pub struct Node {
     verifier: Arc<TokenVerifier>,
     client_insecure: bool,
     namespaces: Namespaces,
+    /// Optional connect-proxy: when set, CONNECT is authenticated via this
+    /// callback rather than a JWT.
+    connect_proxy: Option<Arc<dyn ConnectProxy>>,
     /// Use seq/gen instead of offset on the wire (centrifugo v2.8.6 default:
     /// config `v3_use_offset=false`). Real SDKs of this era expect seq/gen.
     use_seq_gen: bool,
@@ -136,12 +140,14 @@ pub struct Node {
 impl Node {
     /// Build a node from a pre-constructed hub + engine (used when the engine is
     /// built asynchronously, e.g. the Redis engine). Pair with [`make_route`].
+    /// `connect_proxy` enables proxy-based connect authentication when `Some`.
     pub fn new_with_engine(
         hub: Arc<Hub>,
         engine: Arc<dyn Engine>,
         verifier: Arc<TokenVerifier>,
         client_insecure: bool,
         namespaces: Namespaces,
+        connect_proxy: Option<Arc<dyn ConnectProxy>>,
     ) -> Arc<Self> {
         Arc::new(Node {
             hub,
@@ -149,6 +155,7 @@ impl Node {
             verifier,
             client_insecure,
             namespaces,
+            connect_proxy,
             use_seq_gen: true,
         })
     }
@@ -162,7 +169,7 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
-        Self::new_with_engine(hub, engine, verifier, client_insecure, namespaces)
+        Self::new_with_engine(hub, engine, verifier, client_insecure, namespaces, None)
     }
 
     /// Build an insecure single-node memory node (no token, no presence). Used
@@ -189,6 +196,11 @@ impl Node {
 
     pub fn client_insecure(&self) -> bool {
         self.client_insecure
+    }
+
+    /// The connect-proxy, if configured.
+    pub fn connect_proxy(&self) -> Option<&Arc<dyn ConnectProxy>> {
+        self.connect_proxy.as_ref()
     }
 
     /// Channel options for `channel`, or `None` if it names an unknown namespace.

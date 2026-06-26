@@ -78,6 +78,10 @@ pub struct ServeArgs {
     /// API key required in `authorization: apikey <KEY>` gRPC metadata (empty = open).
     #[arg(long = "grpc_api_key", default_value = "")]
     pub grpc_api_key: String,
+    /// Connect-proxy endpoint URL; when set, CONNECT is authenticated via this
+    /// HTTP callback instead of a JWT.
+    #[arg(long = "proxy_connect_endpoint", default_value = "")]
+    pub proxy_connect_endpoint: String,
     /// Engine backing pub/sub, history and presence: `memory` or `redis`.
     #[arg(long = "engine", default_value = "memory")]
     pub engine: String,

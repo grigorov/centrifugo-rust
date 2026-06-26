@@ -26,6 +26,7 @@ pub struct Settings {
     pub grpc_api_key: String,
     pub engine: String,
     pub redis_address: String,
+    pub proxy_connect_endpoint: String,
     pub namespaces: Namespaces,
 }
 
@@ -60,6 +61,7 @@ impl Settings {
             grpc_api_key: a.grpc_api_key.clone(),
             engine: a.engine.clone(),
             redis_address: a.redis_address.clone(),
+            proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
             namespaces: Namespaces {
                 default: ChannelOptions {
                     presence: a.presence,
@@ -102,6 +104,7 @@ impl Settings {
             grpc_api_key: fc.grpc_api_key,
             engine: fc.engine,
             redis_address: fc.redis_address,
+            proxy_connect_endpoint: fc.proxy_connect_endpoint,
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -196,6 +199,8 @@ struct FileConfig {
     engine: String,
     #[serde(default = "default_redis_address")]
     redis_address: String,
+    #[serde(default)]
+    proxy_connect_endpoint: String,
     #[serde(flatten)]
     options: ChannelOptionsCfg,
     #[serde(default = "default_ns_boundary")]

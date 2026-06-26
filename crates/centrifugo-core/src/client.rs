@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::hub::{ClientHandle, ClientId, Out};
 use crate::node::Node;
+use crate::proxy::ProxyConnectRequest;
 
 /// Result of dispatching one command: replies to send, plus an optional
 /// disconnect that closes the connection (with a specific code + reason).
@@ -99,7 +100,7 @@ impl Client {
         match cmd.method {
             // CONNECT may itself decide to disconnect (invalid token), so it
             // returns its own outcome.
-            MethodType::Connect => self.on_connect(cmd),
+            MethodType::Connect => self.on_connect(cmd).await,
             MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd).await),
             MethodType::Publish => CommandOutcome::replies(self.on_publish(cmd).await),
             MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd).await),
@@ -126,7 +127,7 @@ impl Client {
         }
     }
 
-    fn on_connect(&mut self, cmd: &Command) -> CommandOutcome {
+    async fn on_connect(&mut self, cmd: &Command) -> CommandOutcome {
         if self.authenticated {
             return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
         }
@@ -135,9 +136,27 @@ impl Client {
             Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
 
-        // Determine identity. Insecure mode skips auth; otherwise a token is
-        // required and verified.
-        let (user, info, expire_at) = if self.node.client_insecure() {
+        // The client id is assigned before auth so a connect-proxy can receive it.
+        self.id = Uuid::new_v4().to_string();
+
+        // Determine identity. Precedence: connect-proxy (when configured) →
+        // insecure (anonymous) → JWT.
+        let (user, info, expire_at) = if let Some(proxy) = self.node.connect_proxy() {
+            let preq = ProxyConnectRequest {
+                client: self.id.clone(),
+                transport: "websocket".into(),
+                protocol: match self.proto {
+                    ProtocolType::Json => "json".into(),
+                    ProtocolType::Protobuf => "protobuf".into(),
+                },
+                data: None,
+            };
+            match proxy.connect(preq).await {
+                Ok(reply) => (reply.user, reply.info, reply.expire_at),
+                // Proxy rejected or unreachable -> close the connection.
+                Err(_) => return CommandOutcome::disconnect(Disconnect::invalid_token()),
+            }
+        } else if self.node.client_insecure() {
             (String::new(), None, 0)
         } else if !req.token.is_empty() {
             match self.node.verifier().verify_connect_token(&req.token) {
@@ -159,7 +178,6 @@ impl Client {
             return CommandOutcome::disconnect(Disconnect::invalid_token());
         };
 
-        self.id = Uuid::new_v4().to_string();
         self.user = user;
         self.conn_info = info;
         self.expire_at = expire_at;
