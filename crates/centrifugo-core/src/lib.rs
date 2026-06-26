@@ -8,8 +8,8 @@ pub mod hub;
 pub mod memory;
 pub mod node;
 
-pub use client::Client;
+pub use client::{Client, CommandOutcome};
 pub use engine::Broker;
-pub use hub::{ClientHandle, ClientId, Hub};
+pub use hub::{ClientHandle, ClientId, Hub, Out};
 pub use memory::MemoryBroker;
 pub use node::Node;

@@ -10,14 +10,37 @@ use centrifugo_protocol::messages::{
     ClientInfo, ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest,
     SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
-use centrifugo_protocol::{Command, Error, MethodType, ProtocolType, Raw, Reply};
+use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-use crate::hub::{ClientHandle, ClientId};
+use crate::hub::{ClientHandle, ClientId, Out};
 use crate::node::Node;
+
+/// Result of dispatching one command: replies to send, plus an optional
+/// disconnect that closes the connection (with a specific code + reason).
+#[derive(Default)]
+pub struct CommandOutcome {
+    pub replies: Vec<Reply>,
+    pub disconnect: Option<Disconnect>,
+}
+
+impl CommandOutcome {
+    fn replies(replies: Vec<Reply>) -> Self {
+        CommandOutcome {
+            replies,
+            disconnect: None,
+        }
+    }
+    fn disconnect(d: Disconnect) -> Self {
+        CommandOutcome {
+            replies: Vec::new(),
+            disconnect: Some(d),
+        }
+    }
+}
 
 pub struct Client {
     pub id: ClientId,
@@ -25,11 +48,11 @@ pub struct Client {
     proto: ProtocolType,
     authenticated: bool,
     node: Arc<Node>,
-    tx: Sender<Vec<u8>>,
+    tx: Sender<Out>,
 }
 
 impl Client {
-    pub fn new(node: Arc<Node>, tx: Sender<Vec<u8>>, proto: ProtocolType) -> Self {
+    pub fn new(node: Arc<Node>, tx: Sender<Out>, proto: ProtocolType) -> Self {
         Client {
             id: String::new(),
             user: String::new(),
@@ -40,13 +63,14 @@ impl Client {
         }
     }
 
-    /// Dispatch one command, returning zero or more replies to send back.
-    pub fn handle_command(&mut self, cmd: &Command) -> Vec<Reply> {
-        // CONNECT must be first. (M2 upgrades this to a hard disconnect.)
+    /// Dispatch one command. Returns replies and/or a disconnect.
+    pub fn handle_command(&mut self, cmd: &Command) -> CommandOutcome {
+        // CONNECT must be the first command; otherwise close the connection
+        // (Go centrifuge sends DisconnectBadRequest).
         if !self.authenticated && cmd.method != MethodType::Connect {
-            return vec![Reply::err(cmd.id, Error::bad_request())];
+            return CommandOutcome::disconnect(Disconnect::bad_request());
         }
-        match cmd.method {
+        let replies = match cmd.method {
             MethodType::Connect => self.on_connect(cmd),
             MethodType::Subscribe => self.on_subscribe(cmd),
             MethodType::Publish => self.on_publish(cmd),
@@ -63,7 +87,8 @@ impl Client {
             | MethodType::Rpc
             | MethodType::Refresh
             | MethodType::SubRefresh => vec![Reply::err(cmd.id, Error::not_available())],
-        }
+        };
+        CommandOutcome::replies(replies)
     }
 
     fn on_connect(&mut self, cmd: &Command) -> Vec<Reply> {

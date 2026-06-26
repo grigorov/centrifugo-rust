@@ -14,7 +14,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::client::Client;
 use crate::engine::Broker;
-use crate::hub::Hub;
+use crate::hub::{Hub, Out};
 use crate::memory::MemoryBroker;
 
 pub struct Node {
@@ -42,8 +42,8 @@ impl Node {
         &self.broker
     }
 
-    /// Create a per-connection client bound to this node, writing frames to `tx`.
-    pub fn new_client(self: &Arc<Self>, tx: Sender<Vec<u8>>, proto: ProtocolType) -> Client {
+    /// Create a per-connection client bound to this node, writing to `tx`.
+    pub fn new_client(self: &Arc<Self>, tx: Sender<Out>, proto: ProtocolType) -> Client {
         Client::new(self.clone(), tx, proto)
     }
 
@@ -71,11 +71,13 @@ fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<Clien
             ProtocolType::Protobuf => &pb_frame,
         };
         let Some(bytes) = frame else { continue };
-        match handle.tx.try_send(bytes.clone()) {
+        match handle.tx.try_send(Out::Frame(bytes.clone())) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
                 // Slow or gone consumer: drop it so it cannot block the broadcaster.
-                // (Full DisconnectSlow close-frame semantics arrive in M2.5/M2.6.)
+                // (The queue is full, so a DisconnectSlow close frame cannot be
+                // queued; dropping the sender ends the writer task and closes the
+                // socket.)
                 hub.remove(&handle.id);
             }
         }
@@ -130,21 +132,24 @@ mod tests {
     async fn publish_fans_out_to_local_subscriber() {
         let node = Node::new();
 
-        let (tx_b, mut rx_b) = mpsc::channel::<Vec<u8>>(16);
+        let (tx_b, mut rx_b) = mpsc::channel::<Out>(16);
         let mut sub = node.new_client(tx_b, ProtocolType::Json);
         sub.handle_command(&connect_cmd(1));
         sub.handle_command(&subscribe_cmd(2, "news"));
 
-        let (tx_a, _rx_a) = mpsc::channel::<Vec<u8>>(16);
+        let (tx_a, _rx_a) = mpsc::channel::<Out>(16);
         let mut pubr = node.new_client(tx_a, ProtocolType::Json);
         pubr.handle_command(&connect_cmd(1));
         let pub_replies = pubr.handle_command(&publish_cmd(2, "news", r#"{"msg":"hi"}"#));
-        assert!(pub_replies[0].error.is_none());
+        assert!(pub_replies.replies[0].error.is_none());
 
-        let frame = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
+        let out = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
             .await
             .expect("timed out")
             .expect("channel closed");
+        let Out::Frame(frame) = out else {
+            panic!("expected a frame")
+        };
         let s = String::from_utf8(frame).unwrap();
         assert!(s.contains(r#""channel":"news""#), "frame: {s}");
         assert!(s.contains(r#""msg":"hi""#), "frame: {s}");
@@ -158,18 +163,18 @@ mod tests {
     #[tokio::test]
     async fn second_connect_is_rejected() {
         let node = Node::new();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(16);
+        let (tx, _rx) = mpsc::channel::<Out>(16);
         let mut c = node.new_client(tx, ProtocolType::Json);
         let r1 = c.handle_command(&connect_cmd(1));
-        assert!(r1[0].error.is_none());
+        assert!(r1.replies[0].error.is_none());
         let r2 = c.handle_command(&connect_cmd(2));
-        assert_eq!(r2[0].error.as_ref().unwrap().code, 107); // bad request
+        assert_eq!(r2.replies[0].error.as_ref().unwrap().code, 107); // bad request
     }
 
     #[tokio::test]
     async fn send_has_no_reply_and_unimplemented_methods_are_not_available() {
         let node = Node::new();
-        let (tx, _rx) = mpsc::channel::<Vec<u8>>(16);
+        let (tx, _rx) = mpsc::channel::<Out>(16);
         let mut c = node.new_client(tx, ProtocolType::Json);
         c.handle_command(&connect_cmd(1));
 
@@ -179,7 +184,7 @@ mod tests {
             params: Some(raw(r#"{"data":{}}"#.into())),
         };
         assert!(
-            c.handle_command(&send).is_empty(),
+            c.handle_command(&send).replies.is_empty(),
             "SEND must produce no reply"
         );
 
@@ -189,6 +194,6 @@ mod tests {
             params: Some(raw(r#"{"channel":"x"}"#.into())),
         };
         let r = c.handle_command(&presence);
-        assert_eq!(r[0].error.as_ref().unwrap().code, 108); // not available
+        assert_eq!(r.replies[0].error.as_ref().unwrap().code, 108); // not available
     }
 }

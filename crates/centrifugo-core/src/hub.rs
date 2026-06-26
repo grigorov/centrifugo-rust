@@ -8,11 +8,19 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use centrifugo_protocol::ProtocolType;
+use centrifugo_protocol::{Disconnect, ProtocolType};
 use parking_lot::RwLock;
 use tokio::sync::mpsc::Sender;
 
 pub type ClientId = String;
+
+/// An item queued to a connection's writer task: either an encoded frame or a
+/// request to close the connection with a specific disconnect (code + reason).
+#[derive(Debug, Clone)]
+pub enum Out {
+    Frame(Vec<u8>),
+    Close(Disconnect),
+}
 
 /// A cheap, clonable handle to a connection's writer queue. `proto` selects which
 /// pre-encoded push frame (JSON or protobuf) the broadcaster delivers.
@@ -21,7 +29,7 @@ pub struct ClientHandle {
     pub id: ClientId,
     pub user: String,
     pub proto: ProtocolType,
-    pub tx: Sender<Vec<u8>>,
+    pub tx: Sender<Out>,
 }
 
 const SHARDS: usize = 16;
@@ -135,7 +143,7 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    fn handle(id: &str, user: &str) -> (ClientHandle, mpsc::Receiver<Vec<u8>>) {
+    fn handle(id: &str, user: &str) -> (ClientHandle, mpsc::Receiver<Out>) {
         let (tx, rx) = mpsc::channel(16);
         (
             ClientHandle {

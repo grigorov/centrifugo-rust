@@ -178,6 +178,24 @@ impl WsJsonClient {
             }
         }
     }
+
+    /// Wait for the connection to close; return (close code, reason text).
+    /// Returns code 0 if the socket ends without a Close frame.
+    pub async fn next_close(&mut self) -> (u16, String) {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(3), self.ws.next()).await {
+                Ok(Some(Ok(Message::Close(frame)))) => {
+                    return match frame {
+                        Some(cf) => (u16::from(cf.code), cf.reason.to_string()),
+                        None => (0, String::new()),
+                    };
+                }
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(_))) | Ok(None) => return (0, String::new()),
+                Err(_) => panic!("timeout waiting for close frame"),
+            }
+        }
+    }
 }
 
 // ---- Protobuf WS client ----
