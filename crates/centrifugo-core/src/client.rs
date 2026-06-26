@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
-use centrifugo_protocol::command::Raw;
 use centrifugo_protocol::messages::{
     ClientInfo, ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest,
     SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
-use centrifugo_protocol::{Command, Error, MethodType, Reply};
+use centrifugo_protocol::{Command, Error, MethodType, Raw, Reply};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
@@ -97,11 +96,7 @@ impl Client {
         if req.channel.is_empty() {
             return vec![Reply::err(cmd.id, Error::bad_request())];
         }
-        let data = req
-            .data
-            .as_ref()
-            .map(|r| r.get().as_bytes())
-            .unwrap_or(b"null");
+        let data = req.data.as_ref().map(|r| r.as_bytes()).unwrap_or(b"null");
         // A client-initiated publication carries the publisher's ClientInfo,
         // matching Go centrifuge behavior.
         let info = ClientInfo {
@@ -133,7 +128,7 @@ impl Client {
 fn parse_params<T: DeserializeOwned + Default>(params: &Option<Raw>) -> Result<T, Error> {
     match params {
         None => Ok(T::default()),
-        Some(raw) => serde_json::from_str(raw.get()).map_err(|_| Error::bad_request()),
+        Some(raw) => serde_json::from_slice(raw.as_bytes()).map_err(|_| Error::bad_request()),
     }
 }
 

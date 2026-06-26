@@ -9,8 +9,7 @@ use std::sync::Arc;
 use centrifugo_protocol::command::encode_raw;
 use centrifugo_protocol::json::encode_reply;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
-use centrifugo_protocol::{Push, PushType, Reply};
-use serde_json::value::RawValue;
+use centrifugo_protocol::{Push, PushType, Raw, Reply};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
@@ -57,12 +56,8 @@ impl Node {
 
 /// Encode a publication push once and fan it out to all subscribers of `channel`.
 fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<ClientInfo>) {
-    let data_raw = match RawValue::from_string(String::from_utf8_lossy(data).into_owned()) {
-        Ok(r) => Some(r),
-        Err(_) => return, // not valid JSON; drop (publish validation happens upstream)
-    };
     let publication = Publication {
-        data: data_raw,
+        data: Some(Raw::from_bytes(data)),
         info,
         ..Default::default()
     };
@@ -95,12 +90,12 @@ fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<Clien
 #[cfg(test)]
 mod tests {
     use super::*;
-    use centrifugo_protocol::{Command, MethodType};
+    use centrifugo_protocol::{Command, MethodType, Raw};
     use std::time::Duration;
     use tokio::sync::mpsc;
 
-    fn raw(s: String) -> Box<RawValue> {
-        RawValue::from_string(s).unwrap()
+    fn raw(s: String) -> Raw {
+        Raw::from_bytes(s.into_bytes())
     }
     fn connect_cmd(id: u32) -> Command {
         Command {

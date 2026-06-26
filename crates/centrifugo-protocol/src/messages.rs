@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::command::Raw;
+use crate::raw::Raw;
 
 fn is_false(b: &bool) -> bool {
     !*b
@@ -139,10 +139,9 @@ pub struct Publication {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::value::RawValue;
 
     fn raw(s: &str) -> Raw {
-        RawValue::from_string(s.to_string()).unwrap()
+        Raw::from_bytes(s.as_bytes())
     }
 
     #[test]

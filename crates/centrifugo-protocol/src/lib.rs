@@ -9,8 +9,11 @@ pub mod error;
 pub mod json;
 pub mod messages;
 pub mod method;
+pub mod pb;
+pub mod raw;
 
-pub use command::{Command, Push, Raw, Reply};
+pub use command::{Command, Push, Reply};
 pub use disconnect::Disconnect;
 pub use error::Error;
 pub use method::{MethodType, PushType};
+pub use raw::Raw;

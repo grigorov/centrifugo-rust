@@ -35,10 +35,10 @@ pub fn encode_replies(replies: &[Reply]) -> Result<Vec<u8>, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::value::RawValue;
+    use crate::Raw;
 
-    fn raw(s: &str) -> Box<RawValue> {
-        RawValue::from_string(s.to_string()).unwrap()
+    fn raw(s: &str) -> Raw {
+        Raw::from_bytes(s.as_bytes())
     }
 
     #[test]

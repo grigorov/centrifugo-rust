@@ -3,14 +3,10 @@
 //! `id==0` whose `result` is the encoded `Push`).
 
 use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
 
 use crate::error::Error;
 use crate::method::{MethodType, PushType};
-
-/// An inline-raw-JSON byte field (`protocol.Raw`). Serializes verbatim, never
-/// base64; `None` serializes as `null` on fields that lack `omitempty`.
-pub type Raw = Box<RawValue>;
+use crate::raw::Raw;
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
@@ -90,10 +86,9 @@ impl Push {
     }
 }
 
-/// Encode a value to an inline `Raw` (boxed `RawValue`).
+/// Encode a value to JSON bytes wrapped as `Raw`.
 pub fn encode_raw<T: Serialize>(value: &T) -> Result<Raw, serde_json::Error> {
-    let s = serde_json::to_string(value)?;
-    RawValue::from_string(s)
+    Ok(Raw(serde_json::to_vec(value)?))
 }
 
 #[cfg(test)]
@@ -101,7 +96,7 @@ mod tests {
     use super::*;
 
     fn raw(s: &str) -> Raw {
-        RawValue::from_string(s.to_string()).unwrap()
+        Raw::from_bytes(s.as_bytes())
     }
 
     #[test]
@@ -173,10 +168,8 @@ mod tests {
                 .unwrap();
         assert_eq!(cmd.id, 5);
         assert_eq!(cmd.method, MethodType::Publish);
-        assert_eq!(
-            cmd.params.unwrap().get(),
-            r#"{"channel":"x","data":{"a":1}}"#
-        );
+        let p = cmd.params.unwrap();
+        assert_eq!(&*p.as_str(), r#"{"channel":"x","data":{"a":1}}"#);
     }
 
     #[test]
