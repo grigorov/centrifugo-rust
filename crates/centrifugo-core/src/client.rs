@@ -52,8 +52,17 @@ impl Client {
             MethodType::Publish => self.on_publish(cmd),
             MethodType::Unsubscribe => self.on_unsubscribe(cmd),
             MethodType::Ping => vec![ok_reply(self.proto, cmd.id, &PingResult {})],
-            // Remaining methods land in later milestones.
-            _ => vec![Reply::err(cmd.id, Error::method_not_found())],
+            // SEND is fire-and-forget: no reply.
+            MethodType::Send => vec![],
+            // Features that arrive in later milestones report "not available"
+            // (matching Go when the feature/handler is absent) rather than
+            // "method not found".
+            MethodType::Presence
+            | MethodType::PresenceStats
+            | MethodType::History
+            | MethodType::Rpc
+            | MethodType::Refresh
+            | MethodType::SubRefresh => vec![Reply::err(cmd.id, Error::not_available())],
         }
     }
 

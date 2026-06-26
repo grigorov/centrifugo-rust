@@ -165,4 +165,30 @@ mod tests {
         let r2 = c.handle_command(&connect_cmd(2));
         assert_eq!(r2[0].error.as_ref().unwrap().code, 107); // bad request
     }
+
+    #[tokio::test]
+    async fn send_has_no_reply_and_unimplemented_methods_are_not_available() {
+        let node = Node::new();
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+        c.handle_command(&connect_cmd(1));
+
+        let send = Command {
+            id: 0,
+            method: MethodType::Send,
+            params: Some(raw(r#"{"data":{}}"#.into())),
+        };
+        assert!(
+            c.handle_command(&send).is_empty(),
+            "SEND must produce no reply"
+        );
+
+        let presence = Command {
+            id: 5,
+            method: MethodType::Presence,
+            params: Some(raw(r#"{"channel":"x"}"#.into())),
+        };
+        let r = c.handle_command(&presence);
+        assert_eq!(r[0].error.as_ref().unwrap().code, 108); // not available
+    }
 }
