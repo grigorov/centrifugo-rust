@@ -1,0 +1,17 @@
+# Rust
+/target
+**/target
+Cargo.lock.orig
+*.rs.bk
+
+# Go oracle build artifacts
+/conformance/go-oracle/bin
+/conformance/go-oracle/centrifugo
+*.test
+
+# Env / local
+.env
+.DS_Store
+
+# Scratch
+/scratch
