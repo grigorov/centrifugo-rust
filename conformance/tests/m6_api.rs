@@ -97,6 +97,44 @@ async fn presence_stats_via_api() {
 }
 
 #[tokio::test]
+async fn api_validation_error_codes() {
+    // Go executor parity: empty channel/data -> 107, unknown namespace -> 102,
+    // capability disabled -> 108.
+    let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
+
+    // publish empty data -> 107.
+    let r = api_post(&s.http, KEY, r#"{"method":"publish","params":{"channel":"x"}}"#).await;
+    assert_eq!(r["error"]["code"], 107, "empty data: {r}");
+
+    // presence on a channel without presence enabled -> 108.
+    let r = api_post(&s.http, KEY, r#"{"method":"presence","params":{"channel":"x"}}"#).await;
+    assert_eq!(r["error"]["code"], 108, "presence disabled: {r}");
+
+    // history on a channel without history enabled -> 108.
+    let r = api_post(&s.http, KEY, r#"{"method":"history","params":{"channel":"x"}}"#).await;
+    assert_eq!(r["error"]["code"], 108, "history disabled: {r}");
+
+    // empty channel -> 107.
+    let r = api_post(&s.http, KEY, r#"{"method":"presence","params":{"channel":""}}"#).await;
+    assert_eq!(r["error"]["code"], 107, "empty channel: {r}");
+}
+
+#[tokio::test]
+async fn api_unknown_namespace_matches_go() {
+    // A channel naming an undefined namespace -> 102 on both implementations.
+    let cfg = r#"{"client_insecure":true,"api_key":"testkey"}"#;
+    let Some(go) = Oracle::start_with_config(cfg).await else {
+        return;
+    };
+    let rust = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
+    let body = r#"{"method":"publish","params":{"channel":"nope:room","data":{"a":1}}}"#;
+    let go_r = api_post(&go.http, KEY, body).await;
+    let rust_r = api_post(&rust.http, KEY, body).await;
+    assert_eq!(go_r["error"]["code"], 102, "go: {go_r}");
+    assert_eq!(rust_r["error"]["code"], 102, "rust: {rust_r}");
+}
+
+#[tokio::test]
 async fn history_result_shape_matches_go() {
     let go_cfg =
         r#"{"client_insecure":true,"api_key":"testkey","history_size":10,"history_lifetime":60}"#;

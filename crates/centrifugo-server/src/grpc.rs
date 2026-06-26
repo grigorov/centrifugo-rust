@@ -42,13 +42,23 @@ fn to_pb_publication(p: DomainPublication) -> pb::Publication {
     }
 }
 
-/// Data bytes for publish/broadcast; an empty payload publishes the JSON `null`,
-/// matching the HTTP API's missing-`data` behavior.
-fn pub_data(data: Vec<u8>) -> Vec<u8> {
-    if data.is_empty() {
-        b"null".to_vec()
-    } else {
-        data
+fn api_err(code: u32, message: &str) -> pb::Error {
+    pb::Error {
+        code,
+        message: message.into(),
+    }
+}
+
+/// Validate a channel for an API command (Go executor parity): empty channel →
+/// BadRequest(107), unknown namespace → NamespaceNotFound(102). Returns
+/// `(presence_enabled, history_enabled)` on success.
+fn channel_caps(node: &Node, channel: &str) -> Result<(bool, bool), pb::Error> {
+    if channel.is_empty() {
+        return Err(api_err(107, "bad request"));
+    }
+    match node.channel_options(channel) {
+        Some(o) => Ok((o.presence, o.history_enabled())),
+        None => Err(api_err(102, "namespace not found")),
     }
 }
 
@@ -59,9 +69,19 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::PublishRequest>,
     ) -> Result<Response<pb::PublishResponse>, Status> {
         let req = request.into_inner();
-        self.node
-            .publish(&req.channel, &pub_data(req.data), None)
-            .await;
+        if req.data.is_empty() {
+            return Ok(Response::new(pb::PublishResponse {
+                error: Some(api_err(107, "bad request")),
+                result: None,
+            }));
+        }
+        if let Err(e) = channel_caps(&self.node, &req.channel) {
+            return Ok(Response::new(pb::PublishResponse {
+                error: Some(e),
+                result: None,
+            }));
+        }
+        self.node.publish(&req.channel, &req.data, None).await;
         Ok(Response::new(pb::PublishResponse {
             error: None,
             result: None,
@@ -73,14 +93,24 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::BroadcastRequest>,
     ) -> Result<Response<pb::BroadcastResponse>, Status> {
         let req = request.into_inner();
-        let data = pub_data(req.data);
-        for ch in &req.channels {
-            self.node.publish(ch, &data, None).await;
+        let body = |error| {
+            Ok(Response::new(pb::BroadcastResponse {
+                error,
+                result: None,
+            }))
+        };
+        if req.channels.is_empty() || req.data.is_empty() {
+            return body(Some(api_err(107, "bad request")));
         }
-        Ok(Response::new(pb::BroadcastResponse {
-            error: None,
-            result: None,
-        }))
+        for ch in &req.channels {
+            if let Err(e) = channel_caps(&self.node, ch) {
+                return body(Some(e));
+            }
+        }
+        for ch in &req.channels {
+            self.node.publish(ch, &req.data, None).await;
+        }
+        body(None)
     }
 
     async fn unsubscribe(
@@ -111,6 +141,21 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::PresenceRequest>,
     ) -> Result<Response<pb::PresenceResponse>, Status> {
         let req = request.into_inner();
+        match channel_caps(&self.node, &req.channel) {
+            Ok((presence, _)) if !presence => {
+                return Ok(Response::new(pb::PresenceResponse {
+                    error: Some(api_err(108, "not available")),
+                    result: None,
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(Response::new(pb::PresenceResponse {
+                    error: Some(e),
+                    result: None,
+                }));
+            }
+        }
         let presence = self
             .node
             .presence(&req.channel)
@@ -129,6 +174,21 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::PresenceStatsRequest>,
     ) -> Result<Response<pb::PresenceStatsResponse>, Status> {
         let req = request.into_inner();
+        match channel_caps(&self.node, &req.channel) {
+            Ok((presence, _)) if !presence => {
+                return Ok(Response::new(pb::PresenceStatsResponse {
+                    error: Some(api_err(108, "not available")),
+                    result: None,
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(Response::new(pb::PresenceStatsResponse {
+                    error: Some(e),
+                    result: None,
+                }));
+            }
+        }
         let (num_clients, num_users) = self.node.presence_stats(&req.channel).await;
         Ok(Response::new(pb::PresenceStatsResponse {
             error: None,
@@ -144,6 +204,21 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::HistoryRequest>,
     ) -> Result<Response<pb::HistoryResponse>, Status> {
         let req = request.into_inner();
+        match channel_caps(&self.node, &req.channel) {
+            Ok((_, history)) if !history => {
+                return Ok(Response::new(pb::HistoryResponse {
+                    error: Some(api_err(108, "not available")),
+                    result: None,
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(Response::new(pb::HistoryResponse {
+                    error: Some(e),
+                    result: None,
+                }));
+            }
+        }
         let (pubs, _top) = self.node.history(&req.channel).await;
         let publications = pubs.into_iter().map(to_pb_publication).collect();
         Ok(Response::new(pb::HistoryResponse {
@@ -157,6 +232,21 @@ impl Centrifugo for GrpcApi {
         request: Request<pb::HistoryRemoveRequest>,
     ) -> Result<Response<pb::HistoryRemoveResponse>, Status> {
         let req = request.into_inner();
+        match channel_caps(&self.node, &req.channel) {
+            Ok((_, history)) if !history => {
+                return Ok(Response::new(pb::HistoryRemoveResponse {
+                    error: Some(api_err(108, "not available")),
+                    result: None,
+                }));
+            }
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(Response::new(pb::HistoryRemoveResponse {
+                    error: Some(e),
+                    result: None,
+                }));
+            }
+        }
         self.node.remove_history(&req.channel).await;
         Ok(Response::new(pb::HistoryRemoveResponse {
             error: None,

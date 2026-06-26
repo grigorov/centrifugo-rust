@@ -145,6 +145,42 @@ async fn grpc_presence_stats() {
 }
 
 #[tokio::test]
+async fn grpc_validation_error_codes() {
+    // Go executor parity over gRPC: empty data -> 107, presence disabled -> 108.
+    let s = Server::start_grpc(r#"{"client_insecure":true}"#, KEY).await;
+    let mut c = grpc_client(&s.grpc_addr()).await;
+
+    let pub_err = c
+        .publish(with_key(
+            pb::PublishRequest {
+                channel: "x".into(),
+                data: Vec::new(),
+            },
+            KEY,
+        ))
+        .await
+        .expect("publish call")
+        .into_inner()
+        .error
+        .expect("expected publish error");
+    assert_eq!(pub_err.code, 107, "empty data must be 107");
+
+    let pres_err = c
+        .presence(with_key(
+            pb::PresenceRequest {
+                channel: "x".into(),
+            },
+            KEY,
+        ))
+        .await
+        .expect("presence call")
+        .into_inner()
+        .error
+        .expect("expected presence error");
+    assert_eq!(pres_err.code, 108, "presence disabled must be 108");
+}
+
+#[tokio::test]
 async fn grpc_history_matches_go() {
     let cfg = r#"{"client_insecure":true,"history_size":10,"history_lifetime":60}"#;
     let Some(go) = Oracle::start_grpc(cfg, KEY).await else {

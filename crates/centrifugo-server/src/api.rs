@@ -233,6 +233,19 @@ fn err(id: u32, code: u32, message: &str) -> ApiReply {
     }
 }
 
+/// Validate a channel for an API command, mirroring the Go executor: empty
+/// channel → BadRequest(107), unknown namespace → NamespaceNotFound(102).
+/// Returns `(presence_enabled, history_enabled)` on success.
+fn channel_caps(node: &Node, id: u32, channel: &str) -> Result<(bool, bool), ApiReply> {
+    if channel.is_empty() {
+        return Err(err(id, 107, "bad request"));
+    }
+    match node.channel_options(channel) {
+        Some(o) => Ok((o.presence, o.history_enabled())),
+        None => Err(err(id, 102, "namespace not found")),
+    }
+}
+
 async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
     let id = cmd.id;
     let params = cmd.params;
@@ -247,21 +260,32 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
     match cmd.method.as_str() {
         "publish" => {
             let r: PublishReq = req!(PublishReq);
-            let data = r
-                .data
-                .as_ref()
-                .map(|d| d.get().as_bytes())
-                .unwrap_or(b"null");
+            // Go: empty data -> BadRequest(107) (no default-`null` fallback).
+            let data = match r.data.as_ref() {
+                Some(d) => d.get().as_bytes(),
+                None => return err(id, 107, "bad request"),
+            };
+            if let Err(e) = channel_caps(node, id, &r.channel) {
+                return e;
+            }
             node.publish(&r.channel, data, None).await;
             void(id)
         }
         "broadcast" => {
             let r: BroadcastReq = req!(BroadcastReq);
-            let data = r
-                .data
-                .as_ref()
-                .map(|d| d.get().as_bytes())
-                .unwrap_or(b"null");
+            if r.channels.is_empty() {
+                return err(id, 107, "bad request");
+            }
+            let data = match r.data.as_ref() {
+                Some(d) => d.get().as_bytes(),
+                None => return err(id, 107, "bad request"),
+            };
+            // Validate every channel first (107/102); only then publish all.
+            for ch in &r.channels {
+                if let Err(e) = channel_caps(node, id, ch) {
+                    return e;
+                }
+            }
             for ch in &r.channels {
                 node.publish(ch, data, None).await;
             }
@@ -269,6 +293,11 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "presence" => {
             let r: ChannelReq = req!(ChannelReq);
+            match channel_caps(node, id, &r.channel) {
+                Ok((presence, _)) if !presence => return err(id, 108, "not available"),
+                Ok(_) => {}
+                Err(e) => return e,
+            }
             ok(
                 id,
                 &PresenceResult {
@@ -278,6 +307,11 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "presence_stats" => {
             let r: ChannelReq = req!(ChannelReq);
+            match channel_caps(node, id, &r.channel) {
+                Ok((presence, _)) if !presence => return err(id, 108, "not available"),
+                Ok(_) => {}
+                Err(e) => return e,
+            }
             let (num_clients, num_users) = node.presence_stats(&r.channel).await;
             ok(
                 id,
@@ -289,6 +323,11 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "history" => {
             let r: ChannelReq = req!(ChannelReq);
+            match channel_caps(node, id, &r.channel) {
+                Ok((_, history)) if !history => return err(id, 108, "not available"),
+                Ok(_) => {}
+                Err(e) => return e,
+            }
             let (pubs, _top) = node.history(&r.channel).await;
             let publications = pubs
                 .into_iter()
@@ -302,6 +341,11 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         }
         "history_remove" => {
             let r: ChannelReq = req!(ChannelReq);
+            match channel_caps(node, id, &r.channel) {
+                Ok((_, history)) if !history => return err(id, 108, "not available"),
+                Ok(_) => {}
+                Err(e) => return e,
+            }
             node.remove_history(&r.channel).await;
             void(id)
         }
