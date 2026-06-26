@@ -42,6 +42,9 @@ pub struct ServeArgs {
     /// Path to a PEM ECDSA public key for ES256/384 tokens.
     #[arg(long = "token_ecdsa_public_key", default_value = "")]
     pub token_ecdsa_public_key: String,
+    /// JWKS endpoint URL; keys are fetched and matched by token `kid`.
+    #[arg(long = "token_jwks_public_endpoint", default_value = "")]
+    pub token_jwks_public_endpoint: String,
     /// Enable presence on all channels.
     #[arg(long = "presence")]
     pub presence: bool,

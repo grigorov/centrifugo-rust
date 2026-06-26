@@ -324,6 +324,7 @@ dependencies = [
  "futures-util",
  "parking_lot",
  "prost",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -403,6 +404,7 @@ name = "conformance"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "centrifugo-grpc",
  "centrifugo-protocol",
  "futures-util",

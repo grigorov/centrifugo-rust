@@ -28,6 +28,34 @@ fn read_pem_opt(path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     }
 }
 
+/// Fetch a JWKS document body from `url`.
+async fn fetch_jwks(url: &str) -> anyhow::Result<String> {
+    Ok(reqwest::Client::new()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?)
+}
+
+/// Periodically refetch the JWKS so rotated keys are picked up without a restart.
+fn spawn_jwks_refresh(verifier: Arc<TokenVerifier>, url: String) {
+    const REFRESH: std::time::Duration = std::time::Duration::from_secs(3600);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(REFRESH).await;
+            match fetch_jwks(&url).await {
+                Ok(body) => {
+                    let n = verifier.set_jwks_from_json(&body).unwrap_or(0);
+                    tracing::debug!("refreshed {n} JWKS key(s) from {url}");
+                }
+                Err(e) => tracing::warn!("JWKS refresh from {url} failed: {e}"),
+            }
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -57,6 +85,19 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?,
             );
+            // JWKS: fetch once now (so a token's `kid` verifies as soon as the
+            // server is healthy), then refresh in the background.
+            if !settings.token_jwks_public_endpoint.is_empty() {
+                let url = settings.token_jwks_public_endpoint.clone();
+                match fetch_jwks(&url).await {
+                    Ok(body) => {
+                        let n = verifier.set_jwks_from_json(&body).unwrap_or(0);
+                        tracing::info!("loaded {n} JWKS key(s) from {url}");
+                    }
+                    Err(e) => tracing::warn!("initial JWKS fetch from {url} failed: {e}"),
+                }
+                spawn_jwks_refresh(Arc::clone(&verifier), url);
+            }
             let addr = settings.socket_addr();
             let api_auth = api::ApiAuth {
                 key: settings.api_key.clone(),

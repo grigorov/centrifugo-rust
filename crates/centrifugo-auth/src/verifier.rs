@@ -1,10 +1,13 @@
 //! `TokenVerifier`: verifies a JWT using the key matching its header algorithm,
 //! then applies Centrifugo's claim semantics.
 
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Header, Validation};
 
 use crate::claims::{ConnectTokenClaims, SubscribeTokenClaims};
 use crate::error::VerifyError;
@@ -35,6 +38,10 @@ pub struct TokenVerifier {
     hmac: Option<DecodingKey>,
     rsa: Option<DecodingKey>,
     ecdsa: Option<DecodingKey>,
+    /// JWKS keys by `kid`, refreshable at runtime (background fetch). A token
+    /// carrying a `kid` present here is verified with the matching key,
+    /// regardless of the static PEM keys.
+    jwks: Arc<RwLock<HashMap<String, DecodingKey>>>,
 }
 
 impl TokenVerifier {
@@ -58,7 +65,12 @@ impl TokenVerifier {
             Some(p) => Some(DecodingKey::from_ec_pem(p).map_err(|_| VerifyError::Invalid)?),
             None => None,
         };
-        Ok(TokenVerifier { hmac, rsa, ecdsa })
+        Ok(TokenVerifier {
+            hmac,
+            rsa,
+            ecdsa,
+            jwks: Arc::default(),
+        })
     }
 
     /// Convenience: HMAC-only verifier.
@@ -66,9 +78,47 @@ impl TokenVerifier {
         TokenVerifier::new(secret, None, None).expect("hmac-only verifier")
     }
 
-    /// Whether any verification key is configured.
+    /// Whether any verification key is configured (static PEM/HMAC or JWKS).
     pub fn is_configured(&self) -> bool {
-        self.hmac.is_some() || self.rsa.is_some() || self.ecdsa.is_some()
+        self.hmac.is_some()
+            || self.rsa.is_some()
+            || self.ecdsa.is_some()
+            || !self.jwks.read().unwrap().is_empty()
+    }
+
+    /// Replace the JWKS key set (called by the server's background refresh task
+    /// after fetching `token_jwks_public_endpoint`). Returns the number of keys
+    /// loaded. Keys without a `kid` are skipped (they cannot be matched).
+    pub fn set_jwks(&self, set: &JwkSet) -> usize {
+        let mut map = HashMap::new();
+        for jwk in &set.keys {
+            if let Some(kid) = jwk.common.key_id.clone() {
+                if let Ok(key) = DecodingKey::from_jwk(jwk) {
+                    map.insert(kid, key);
+                }
+            }
+        }
+        let n = map.len();
+        *self.jwks.write().unwrap() = map;
+        n
+    }
+
+    /// Parse a JWKS JSON document and install it. Lets the server load
+    /// `token_jwks_public_endpoint` without depending on `jsonwebtoken` directly.
+    pub fn set_jwks_from_json(&self, json: &str) -> Result<usize, VerifyError> {
+        let set: JwkSet = serde_json::from_str(json).map_err(|_| VerifyError::Invalid)?;
+        Ok(self.set_jwks(&set))
+    }
+
+    /// Pick the verification key: a `kid` matching the JWKS set wins; otherwise
+    /// fall back to the static key for the header algorithm.
+    fn select_key(&self, header: &Header) -> Option<DecodingKey> {
+        if let Some(kid) = &header.kid {
+            if let Some(key) = self.jwks.read().unwrap().get(kid) {
+                return Some(key.clone());
+            }
+        }
+        self.key_for(header.alg).cloned()
     }
 
     fn key_for(&self, alg: Algorithm) -> Option<&DecodingKey> {
@@ -89,13 +139,13 @@ impl TokenVerifier {
         token: &str,
     ) -> Result<T, VerifyError> {
         let header = decode_header(token).map_err(|_| VerifyError::Invalid)?;
-        let key = self.key_for(header.alg).ok_or(VerifyError::Invalid)?;
+        let key = self.select_key(&header).ok_or(VerifyError::Invalid)?;
         let mut validation = Validation::new(header.alg);
         validation.validate_exp = false;
         validation.validate_nbf = false;
         validation.validate_aud = false;
         validation.required_spec_claims.clear();
-        Ok(decode::<T>(token, key, &validation)
+        Ok(decode::<T>(token, &key, &validation)
             .map_err(|_| VerifyError::Invalid)?
             .claims)
     }
@@ -249,6 +299,54 @@ mod tests {
             .verify_connect_token(&token)
             .unwrap();
         assert_eq!(ct.info.unwrap(), br#"{"a":[1,2]}"#);
+    }
+
+    #[test]
+    fn jwks_verifies_token_by_kid() {
+        // An `oct` (symmetric) JWK keeps the test fast — the kid-selection path
+        // is identical for RSA/ECDSA JWKs.
+        let secret = b"jwks-shared-secret";
+        let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
+        let jwks_json = format!(r#"{{"keys":[{{"kty":"oct","kid":"key1","k":"{k}","alg":"HS256"}}]}}"#);
+        let set: JwkSet = serde_json::from_str(&jwks_json).unwrap();
+
+        let verifier = TokenVerifier::new("", None, None).unwrap();
+        assert_eq!(verifier.set_jwks(&set), 1);
+        assert!(verifier.is_configured());
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("key1".into());
+        let token = encode(
+            &header,
+            &json!({"sub": "jwks-user"}),
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+        let ct = verifier.verify_connect_token(&token).unwrap();
+        assert_eq!(ct.user, "jwks-user");
+    }
+
+    #[test]
+    fn jwks_unknown_kid_is_invalid() {
+        let secret = b"jwks-shared-secret";
+        let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
+        let jwks_json = format!(r#"{{"keys":[{{"kty":"oct","kid":"key1","k":"{k}"}}]}}"#);
+        let set: JwkSet = serde_json::from_str(&jwks_json).unwrap();
+        let verifier = TokenVerifier::new("", None, None).unwrap();
+        verifier.set_jwks(&set);
+
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some("other".into());
+        let token = encode(
+            &header,
+            &json!({"sub": "u"}),
+            &EncodingKey::from_secret(secret),
+        )
+        .unwrap();
+        assert_eq!(
+            verifier.verify_connect_token(&token),
+            Err(VerifyError::Invalid)
+        );
     }
 
     #[test]

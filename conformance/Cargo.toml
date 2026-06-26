@@ -11,6 +11,7 @@ centrifugo-grpc = { path = "../crates/centrifugo-grpc" }
 prost = "0.13"
 tonic = "0.12"
 jsonwebtoken = "9"
+base64 = "0.22"
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

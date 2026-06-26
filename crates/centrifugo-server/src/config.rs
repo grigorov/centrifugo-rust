@@ -18,6 +18,7 @@ pub struct Settings {
     pub token_hmac_secret_key: String,
     pub token_rsa_public_key: String,
     pub token_ecdsa_public_key: String,
+    pub token_jwks_public_endpoint: String,
     pub api_key: String,
     pub api_insecure: bool,
     pub grpc_api: bool,
@@ -51,6 +52,7 @@ impl Settings {
             token_hmac_secret_key: a.token_hmac_secret_key.clone(),
             token_rsa_public_key: a.token_rsa_public_key.clone(),
             token_ecdsa_public_key: a.token_ecdsa_public_key.clone(),
+            token_jwks_public_endpoint: a.token_jwks_public_endpoint.clone(),
             api_key: a.api_key.clone(),
             api_insecure: a.api_insecure,
             grpc_api: a.grpc_api,
@@ -92,6 +94,7 @@ impl Settings {
             token_hmac_secret_key: fc.token_hmac_secret_key,
             token_rsa_public_key: fc.token_rsa_public_key,
             token_ecdsa_public_key: fc.token_ecdsa_public_key,
+            token_jwks_public_endpoint: fc.token_jwks_public_endpoint,
             api_key: fc.api_key,
             api_insecure: fc.api_insecure,
             grpc_api: fc.grpc_api,
@@ -177,6 +180,8 @@ struct FileConfig {
     token_rsa_public_key: String,
     #[serde(default)]
     token_ecdsa_public_key: String,
+    #[serde(default)]
+    token_jwks_public_endpoint: String,
     #[serde(default)]
     api_key: String,
     #[serde(default)]
