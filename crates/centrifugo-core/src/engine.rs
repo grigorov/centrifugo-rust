@@ -7,12 +7,16 @@
 //! non-blocking `try_send`). The trait will gain async variants when the Redis
 //! engine arrives.
 
+use centrifugo_protocol::messages::ClientInfo;
+
 /// Pub/sub side of an engine.
 pub trait Broker: Send + Sync {
-    /// Publish `data` (raw JSON bytes) to `channel`. The single-node memory
-    /// broker routes straight back into the node for local fan-out; a network
-    /// broker would publish to its bus.
-    fn publish(&self, channel: &str, data: &[u8]) -> anyhow::Result<()>;
+    /// Publish `data` (raw JSON bytes) to `channel`, optionally carrying the
+    /// publisher's `ClientInfo` (set for client-initiated publishes; the server
+    /// API publish leaves it `None`). The single-node memory broker routes
+    /// straight back into the node for local fan-out; a network broker would
+    /// publish to its bus.
+    fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) -> anyhow::Result<()>;
 
     /// Note interest in a channel (memory single-node: a no-op, the hub tracks
     /// local subscriptions; a network broker subscribes to the bus topic).

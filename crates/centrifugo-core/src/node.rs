@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use centrifugo_protocol::command::encode_raw;
 use centrifugo_protocol::json::encode_reply;
-use centrifugo_protocol::messages::Publication;
+use centrifugo_protocol::messages::{ClientInfo, Publication};
 use centrifugo_protocol::{Push, PushType, Reply};
 use serde_json::value::RawValue;
 use tokio::sync::mpsc::error::TrySendError;
@@ -30,8 +30,8 @@ impl Node {
     pub fn new() -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let hub_for_route = hub.clone();
-        let broker: Arc<dyn Broker> = Arc::new(MemoryBroker::new(move |channel, data| {
-            deliver_publication(&hub_for_route, &channel, &data);
+        let broker: Arc<dyn Broker> = Arc::new(MemoryBroker::new(move |channel, data, info| {
+            deliver_publication(&hub_for_route, &channel, &data, info);
         }));
         Arc::new(Node { hub, broker })
     }
@@ -56,13 +56,14 @@ impl Node {
 }
 
 /// Encode a publication push once and fan it out to all subscribers of `channel`.
-fn deliver_publication(hub: &Hub, channel: &str, data: &[u8]) {
+fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<ClientInfo>) {
     let data_raw = match RawValue::from_string(String::from_utf8_lossy(data).into_owned()) {
         Ok(r) => Some(r),
         Err(_) => return, // not valid JSON; drop (publish validation happens upstream)
     };
     let publication = Publication {
         data: data_raw,
+        info,
         ..Default::default()
     };
     let encoded_pub = match encode_raw(&publication) {

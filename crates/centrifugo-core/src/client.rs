@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use centrifugo_protocol::command::Raw;
 use centrifugo_protocol::messages::{
-    ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest, SubscribeResult,
-    UnsubscribeRequest, UnsubscribeResult,
+    ClientInfo, ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest,
+    SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Error, MethodType, Reply};
 use serde::de::DeserializeOwned;
@@ -102,7 +102,15 @@ impl Client {
             .as_ref()
             .map(|r| r.get().as_bytes())
             .unwrap_or(b"null");
-        if let Err(_e) = self.node.broker().publish(&req.channel, data) {
+        // A client-initiated publication carries the publisher's ClientInfo,
+        // matching Go centrifuge behavior.
+        let info = ClientInfo {
+            user: self.user.clone(),
+            client: self.id.clone(),
+            conn_info: None,
+            chan_info: None,
+        };
+        if let Err(_e) = self.node.broker().publish(&req.channel, data, Some(info)) {
             return vec![Reply::err(cmd.id, Error::internal())];
         }
         vec![ok_reply(cmd.id, &PublishResult {})]

@@ -5,16 +5,20 @@
 
 use std::sync::Arc;
 
+use centrifugo_protocol::messages::ClientInfo;
+
 use crate::engine::Broker;
 
-type RouteFn = Arc<dyn Fn(String, Vec<u8>) + Send + Sync>;
+type RouteFn = Arc<dyn Fn(String, Vec<u8>, Option<ClientInfo>) + Send + Sync>;
 
 pub struct MemoryBroker {
     route: RouteFn,
 }
 
 impl MemoryBroker {
-    pub fn new(route: impl Fn(String, Vec<u8>) + Send + Sync + 'static) -> Self {
+    pub fn new(
+        route: impl Fn(String, Vec<u8>, Option<ClientInfo>) + Send + Sync + 'static,
+    ) -> Self {
         MemoryBroker {
             route: Arc::new(route),
         }
@@ -22,8 +26,8 @@ impl MemoryBroker {
 }
 
 impl Broker for MemoryBroker {
-    fn publish(&self, channel: &str, data: &[u8]) -> anyhow::Result<()> {
-        (self.route)(channel.to_string(), data.to_vec());
+    fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) -> anyhow::Result<()> {
+        (self.route)(channel.to_string(), data.to_vec(), info);
         Ok(())
     }
 
@@ -45,8 +49,8 @@ mod tests {
     fn publish_routes_to_callback() {
         let routed = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
         let r2 = routed.clone();
-        let broker = MemoryBroker::new(move |ch, data| r2.lock().unwrap().push((ch, data)));
-        broker.publish("news", br#"{"x":1}"#).unwrap();
+        let broker = MemoryBroker::new(move |ch, data, _info| r2.lock().unwrap().push((ch, data)));
+        broker.publish("news", br#"{"x":1}"#, None).unwrap();
         let got = routed.lock().unwrap();
         assert_eq!(got[0].0, "news");
         assert_eq!(got[0].1, br#"{"x":1}"#);

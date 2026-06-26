@@ -6,9 +6,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum MethodType {
+    #[default]
     Connect = 0,
     Subscribe = 1,
     Unsubscribe = 2,
@@ -21,12 +22,6 @@ pub enum MethodType {
     Rpc = 9,
     Refresh = 10,
     SubRefresh = 11,
-}
-
-impl Default for MethodType {
-    fn default() -> Self {
-        MethodType::Connect
-    }
 }
 
 impl MethodType {
@@ -104,21 +99,16 @@ impl<'de> Deserialize<'de> for MethodType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
 pub enum PushType {
+    #[default]
     Publication = 0,
     Join = 1,
     Leave = 2,
     Unsub = 3,
     Message = 4,
     Sub = 5,
-}
-
-impl Default for PushType {
-    fn default() -> Self {
-        PushType::Publication
-    }
 }
 
 impl PushType {
