@@ -12,4 +12,4 @@ pub use client::{Client, CommandOutcome};
 pub use engine::Broker;
 pub use hub::{ClientHandle, ClientId, Hub, Out};
 pub use memory::MemoryBroker;
-pub use node::Node;
+pub use node::{ChannelOptions, Node};

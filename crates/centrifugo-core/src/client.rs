@@ -8,9 +8,9 @@ use std::sync::Arc;
 use centrifugo_auth::VerifyError;
 use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
-    ClientInfo, ConnectRequest, ConnectResult, PingResult, PublishRequest, PublishResult,
-    RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
-    UnsubscribeResult,
+    ClientInfo, ConnectRequest, ConnectResult, PingResult, PresenceRequest, PresenceResult,
+    PresenceStatsRequest, PresenceStatsResult, PublishRequest, PublishResult, RefreshRequest,
+    RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
@@ -53,6 +53,8 @@ pub struct Client {
     conn_info: Option<Vec<u8>>,
     /// Token expiry (unix seconds); 0 means no expiry.
     expire_at: i64,
+    /// Channels this client is subscribed to (for presence/leave on disconnect).
+    subscriptions: Vec<String>,
     node: Arc<Node>,
     tx: Sender<Out>,
 }
@@ -66,8 +68,19 @@ impl Client {
             authenticated: false,
             conn_info: None,
             expire_at: 0,
+            subscriptions: Vec::new(),
             node,
             tx,
+        }
+    }
+
+    /// Build the ClientInfo for this connection (publisher/presence/join-leave).
+    fn client_info(&self) -> ClientInfo {
+        ClientInfo {
+            user: self.user.clone(),
+            client: self.id.clone(),
+            conn_info: self.conn_info.as_ref().map(|b| Raw::from_bytes(b.clone())),
+            chan_info: None,
         }
     }
 
@@ -96,12 +109,11 @@ impl Client {
             MethodType::Rpc => {
                 CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())])
             }
+            MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd)),
+            MethodType::PresenceStats => CommandOutcome::replies(self.on_presence_stats(cmd)),
             // Features that arrive in later milestones report "not available"
             // (matching Go when the feature/handler is absent).
-            MethodType::Presence
-            | MethodType::PresenceStats
-            | MethodType::History
-            | MethodType::SubRefresh => {
+            MethodType::History | MethodType::SubRefresh => {
                 CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())])
             }
         }
@@ -177,7 +189,25 @@ impl Client {
         }
         self.node.hub().subscribe(&self.id, &req.channel);
         let _ = self.node.broker().subscribe(&req.channel);
-        vec![ok_reply(self.proto, cmd.id, &SubscribeResult::default())]
+
+        let (presence, join_leave) = {
+            let o = self.node.opts();
+            (o.presence, o.join_leave)
+        };
+        if presence {
+            self.node
+                .add_presence(&req.channel, &self.id, self.client_info());
+        }
+        if !self.subscriptions.iter().any(|c| c == &req.channel) {
+            self.subscriptions.push(req.channel.clone());
+        }
+        let reply = ok_reply(self.proto, cmd.id, &SubscribeResult::default());
+        // Join is published after the subscribe reply; the joiner is now a
+        // subscriber (matches centrifuge ordering).
+        if join_leave {
+            self.node.publish_join(&req.channel, self.client_info());
+        }
+        vec![reply]
     }
 
     fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -191,12 +221,7 @@ impl Client {
         let data = req.data.as_ref().map(|r| r.as_bytes()).unwrap_or(b"null");
         // A client-initiated publication carries the publisher's ClientInfo,
         // matching Go centrifuge behavior.
-        let info = ClientInfo {
-            user: self.user.clone(),
-            client: self.id.clone(),
-            conn_info: self.conn_info.as_ref().map(|b| Raw::from_bytes(b.clone())),
-            chan_info: None,
-        };
+        let info = self.client_info();
         if let Err(_e) = self.node.broker().publish(&req.channel, data, Some(info)) {
             return vec![Reply::err(cmd.id, Error::internal())];
         }
@@ -209,10 +234,82 @@ impl Client {
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
         if !req.channel.is_empty() {
-            self.node.hub().unsubscribe(&self.id, &req.channel);
-            let _ = self.node.broker().unsubscribe(&req.channel);
+            self.unsubscribe_channel(&req.channel);
         }
         vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})]
+    }
+
+    fn unsubscribe_channel(&mut self, channel: &str) {
+        self.node.hub().unsubscribe(&self.id, channel);
+        let _ = self.node.broker().unsubscribe(channel);
+        let (presence, join_leave) = {
+            let o = self.node.opts();
+            (o.presence, o.join_leave)
+        };
+        if presence {
+            self.node.remove_presence(channel, &self.id);
+        }
+        if join_leave {
+            self.node.publish_leave(channel, self.client_info());
+        }
+        self.subscriptions.retain(|c| c != channel);
+    }
+
+    fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
+        let req: PresenceRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return vec![Reply::err(cmd.id, e)],
+        };
+        let (presence, disable_for_client) = {
+            let o = self.node.opts();
+            (o.presence, o.presence_disable_for_client)
+        };
+        if !presence || disable_for_client {
+            return vec![Reply::err(cmd.id, Error::not_available())];
+        }
+        let result = PresenceResult {
+            presence: self.node.presence(&req.channel),
+        };
+        vec![ok_reply(self.proto, cmd.id, &result)]
+    }
+
+    fn on_presence_stats(&mut self, cmd: &Command) -> Vec<Reply> {
+        let req: PresenceStatsRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return vec![Reply::err(cmd.id, e)],
+        };
+        let (presence, disable_for_client) = {
+            let o = self.node.opts();
+            (o.presence, o.presence_disable_for_client)
+        };
+        if !presence || disable_for_client {
+            return vec![Reply::err(cmd.id, Error::not_available())];
+        }
+        let (num_clients, num_users) = self.node.presence_stats(&req.channel);
+        let result = PresenceStatsResult {
+            num_clients,
+            num_users,
+        };
+        vec![ok_reply(self.proto, cmd.id, &result)]
+    }
+
+    /// Called when the connection closes: publish Leave + clear presence for all
+    /// subscribed channels, then unregister from the hub.
+    pub fn on_disconnect(&mut self) {
+        let channels = std::mem::take(&mut self.subscriptions);
+        let (presence, join_leave) = {
+            let o = self.node.opts();
+            (o.presence, o.join_leave)
+        };
+        for ch in &channels {
+            if presence {
+                self.node.remove_presence(ch, &self.id);
+            }
+            if join_leave {
+                self.node.publish_leave(ch, self.client_info());
+            }
+        }
+        self.node.remove(&self.id);
     }
 
     fn on_refresh(&mut self, cmd: &Command) -> CommandOutcome {

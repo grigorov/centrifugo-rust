@@ -6,7 +6,8 @@
 //! ignored in the domain direction.
 
 use crate::messages::{
-    ClientInfo, ConnectRequest, ConnectResult, Publication, PublishRequest, PublishResult,
+    ClientInfo, ConnectRequest, ConnectResult, Join, Leave, PresenceRequest, PresenceResult,
+    PresenceStatsRequest, PresenceStatsResult, Publication, PublishRequest, PublishResult,
     RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
     UnsubscribeResult,
 };
@@ -235,6 +236,93 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             publications: r.publications.into_iter().map(Into::into).collect(),
             recovered: r.recovered,
             offset: r.offset,
+        }
+    }
+}
+
+// ---- Presence ----
+
+impl From<pb::PresenceRequest> for PresenceRequest {
+    fn from(r: pb::PresenceRequest) -> Self {
+        PresenceRequest { channel: r.channel }
+    }
+}
+impl From<PresenceRequest> for pb::PresenceRequest {
+    fn from(r: PresenceRequest) -> Self {
+        pb::PresenceRequest { channel: r.channel }
+    }
+}
+
+impl From<PresenceResult> for pb::PresenceResult {
+    fn from(r: PresenceResult) -> Self {
+        pb::PresenceResult {
+            presence: r.presence.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        }
+    }
+}
+impl From<pb::PresenceResult> for PresenceResult {
+    fn from(r: pb::PresenceResult) -> Self {
+        PresenceResult {
+            presence: r.presence.into_iter().map(|(k, v)| (k, v.into())).collect(),
+        }
+    }
+}
+
+impl From<pb::PresenceStatsRequest> for PresenceStatsRequest {
+    fn from(r: pb::PresenceStatsRequest) -> Self {
+        PresenceStatsRequest { channel: r.channel }
+    }
+}
+impl From<PresenceStatsRequest> for pb::PresenceStatsRequest {
+    fn from(r: PresenceStatsRequest) -> Self {
+        pb::PresenceStatsRequest { channel: r.channel }
+    }
+}
+
+impl From<PresenceStatsResult> for pb::PresenceStatsResult {
+    fn from(r: PresenceStatsResult) -> Self {
+        pb::PresenceStatsResult {
+            num_clients: r.num_clients,
+            num_users: r.num_users,
+        }
+    }
+}
+impl From<pb::PresenceStatsResult> for PresenceStatsResult {
+    fn from(r: pb::PresenceStatsResult) -> Self {
+        PresenceStatsResult {
+            num_clients: r.num_clients,
+            num_users: r.num_users,
+        }
+    }
+}
+
+// ---- Join / Leave ----
+
+impl From<Join> for pb::Join {
+    fn from(j: Join) -> Self {
+        pb::Join {
+            info: Some(j.info.into()),
+        }
+    }
+}
+impl From<pb::Join> for Join {
+    fn from(j: pb::Join) -> Self {
+        Join {
+            info: j.info.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+impl From<Leave> for pb::Leave {
+    fn from(l: Leave) -> Self {
+        pb::Leave {
+            info: Some(l.info.into()),
+        }
+    }
+}
+impl From<pb::Leave> for Leave {
+    fn from(l: pb::Leave) -> Self {
+        Leave {
+            info: l.info.map(Into::into).unwrap_or_default(),
         }
     }
 }

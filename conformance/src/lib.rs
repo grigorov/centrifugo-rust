@@ -189,6 +189,48 @@ impl WsJsonClient {
         self.next_json().await
     }
 
+    pub async fn unsubscribe(&mut self, id: u32, channel: &str) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":2,"params":{{"channel":"{channel}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
+    pub async fn presence(&mut self, id: u32, channel: &str) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":4,"params":{{"channel":"{channel}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
+    pub async fn presence_stats(&mut self, id: u32, channel: &str) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":5,"params":{{"channel":"{channel}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
+    /// Read pushes until one whose `result.data.info.client` equals `client_id`
+    /// and `result.type` equals `push_type` (1=Join, 2=Leave). Panics on timeout.
+    pub async fn next_join_leave_for(
+        &mut self,
+        push_type: u64,
+        client_id: &str,
+    ) -> serde_json::Value {
+        for _ in 0..20 {
+            let v = self.next_json().await;
+            let r = &v["result"];
+            let t = r.get("type").and_then(|x| x.as_u64()).unwrap_or(0);
+            if t == push_type && r["data"]["info"]["client"] == client_id {
+                return v;
+            }
+        }
+        panic!("did not observe push type {push_type} for client {client_id}");
+    }
+
     /// Read the next text frame's first JSON line, ignoring ping/pong/binary.
     pub async fn next_json(&mut self) -> serde_json::Value {
         loop {

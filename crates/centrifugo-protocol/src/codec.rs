@@ -7,7 +7,8 @@ use prost::Message as _;
 
 use crate::command::encode_raw;
 use crate::messages::{
-    ConnectRequest, ConnectResult, PingResult, Publication, PublishRequest, PublishResult,
+    ConnectRequest, ConnectResult, Join, Leave, PingResult, PresenceRequest, PresenceResult,
+    PresenceStatsRequest, PresenceStatsResult, Publication, PublishRequest, PublishResult,
     RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
     UnsubscribeResult,
 };
@@ -200,6 +201,12 @@ wire!(UnsubscribeResult, pb::UnsubscribeResult);
 wire!(PingResult, pb::PingResult);
 wire!(RefreshRequest, pb::RefreshRequest);
 wire!(RefreshResult, pb::RefreshResult);
+wire!(PresenceRequest, pb::PresenceRequest);
+wire!(PresenceResult, pb::PresenceResult);
+wire!(PresenceStatsRequest, pb::PresenceStatsRequest);
+wire!(PresenceStatsResult, pb::PresenceStatsResult);
+wire!(Join, pb::Join);
+wire!(Leave, pb::Leave);
 wire!(Publication, pb::Publication);
 
 /// Decode a command's params into a typed request (missing params -> default).

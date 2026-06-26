@@ -36,4 +36,13 @@ pub struct ServeArgs {
     /// Path to a PEM ECDSA public key for ES256/384 tokens.
     #[arg(long = "token_ecdsa_public_key", default_value = "")]
     pub token_ecdsa_public_key: String,
+    /// Enable presence on all channels.
+    #[arg(long = "presence")]
+    pub presence: bool,
+    /// Enable join/leave pushes on all channels.
+    #[arg(long = "join_leave")]
+    pub join_leave: bool,
+    /// Disable client-side presence commands even when presence is enabled.
+    #[arg(long = "presence_disable_for_client")]
+    pub presence_disable_for_client: bool,
 }

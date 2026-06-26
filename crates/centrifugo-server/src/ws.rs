@@ -131,9 +131,10 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
         }
     }
 
-    // Unregister and drop every sender so the writer drains, flushes any queued
-    // close frame, and finishes on its own.
-    node.remove(&client.id);
+    // Publish Leave + clear presence for subscribed channels and unregister from
+    // the hub, then drop every sender so the writer drains any queued close frame
+    // and finishes on its own.
+    client.on_disconnect();
     drop(client);
     drop(tx);
     let _ = writer.await;

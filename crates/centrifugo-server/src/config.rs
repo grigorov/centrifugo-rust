@@ -13,6 +13,13 @@ pub struct Config {
     pub token_rsa_public_key: String,
     /// Path to a PEM ECDSA public key for ES256/384 (empty = disabled).
     pub token_ecdsa_public_key: String,
+    /// Enable presence on all channels (default namespace option).
+    pub presence: bool,
+    /// Enable join/leave pushes on all channels.
+    pub join_leave: bool,
+    /// Disable the client-side PRESENCE/PRESENCE_STATS commands even if presence
+    /// is enabled.
+    pub presence_disable_for_client: bool,
 }
 
 impl Config {

@@ -4,12 +4,15 @@
 //! a full (slow) or closed queue causes that client to be dropped, never
 //! blocking the broadcaster.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use centrifugo_auth::TokenVerifier;
-use centrifugo_protocol::codec::{self, ProtocolType};
-use centrifugo_protocol::messages::{ClientInfo, Publication};
+use centrifugo_protocol::codec::{self, ProtocolType, WireType};
+use centrifugo_protocol::messages::{ClientInfo, Join, Leave, Publication};
 use centrifugo_protocol::{Push, PushType, Raw};
+use parking_lot::Mutex;
+use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
@@ -18,17 +21,34 @@ use crate::engine::Broker;
 use crate::hub::{Hub, Out};
 use crate::memory::MemoryBroker;
 
+/// Channel options. In M4 a single default set applies to every channel; full
+/// per-namespace options arrive in M6.
+#[derive(Debug, Clone, Default)]
+pub struct ChannelOptions {
+    pub presence: bool,
+    pub join_leave: bool,
+    pub presence_disable_for_client: bool,
+}
+
 pub struct Node {
     hub: Arc<Hub>,
     broker: Arc<dyn Broker>,
     verifier: Arc<TokenVerifier>,
     client_insecure: bool,
+    opts: ChannelOptions,
+    /// In-memory presence: channel -> (clientID -> ClientInfo). The memory
+    /// engine has no TTL (matches centrifuge MemoryEngine).
+    presence: Mutex<HashMap<String, HashMap<String, ClientInfo>>>,
 }
 
 impl Node {
-    /// Build a single-node memory node with the given token verifier and
-    /// insecure flag.
-    pub fn new_with(verifier: Arc<TokenVerifier>, client_insecure: bool) -> Arc<Self> {
+    /// Build a single-node memory node with the given verifier, insecure flag,
+    /// and default channel options.
+    pub fn new_with(
+        verifier: Arc<TokenVerifier>,
+        client_insecure: bool,
+        opts: ChannelOptions,
+    ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let hub_for_route = hub.clone();
         let broker: Arc<dyn Broker> = Arc::new(MemoryBroker::new(move |channel, data, info| {
@@ -39,13 +59,19 @@ impl Node {
             broker,
             verifier,
             client_insecure,
+            opts,
+            presence: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Build an insecure single-node memory node (no token required). Used by
-    /// tests and the `--client-insecure` server mode.
+    /// Build an insecure single-node memory node (no token, no presence). Used
+    /// by tests and the `--client_insecure` server mode default.
     pub fn new() -> Arc<Self> {
-        Self::new_with(Arc::new(TokenVerifier::default()), true)
+        Self::new_with(
+            Arc::new(TokenVerifier::default()),
+            true,
+            ChannelOptions::default(),
+        )
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
@@ -64,6 +90,60 @@ impl Node {
         self.client_insecure
     }
 
+    pub fn opts(&self) -> &ChannelOptions {
+        &self.opts
+    }
+
+    // ---- presence ----
+
+    pub fn add_presence(&self, channel: &str, client_id: &str, info: ClientInfo) {
+        self.presence
+            .lock()
+            .entry(channel.to_string())
+            .or_default()
+            .insert(client_id.to_string(), info);
+    }
+
+    pub fn remove_presence(&self, channel: &str, client_id: &str) {
+        let mut p = self.presence.lock();
+        if let Some(chan) = p.get_mut(channel) {
+            chan.remove(client_id);
+            if chan.is_empty() {
+                p.remove(channel);
+            }
+        }
+    }
+
+    pub fn presence(&self, channel: &str) -> HashMap<String, ClientInfo> {
+        self.presence
+            .lock()
+            .get(channel)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// (num_clients, num_users): total entries and distinct user ids.
+    pub fn presence_stats(&self, channel: &str) -> (u32, u32) {
+        let p = self.presence.lock();
+        let Some(chan) = p.get(channel) else {
+            return (0, 0);
+        };
+        let num_clients = chan.len() as u32;
+        let users: std::collections::HashSet<&str> =
+            chan.values().map(|ci| ci.user.as_str()).collect();
+        (num_clients, users.len() as u32)
+    }
+
+    // ---- join / leave ----
+
+    pub fn publish_join(&self, channel: &str, info: ClientInfo) {
+        deliver_push(&self.hub, channel, PushType::Join, &Join { info });
+    }
+
+    pub fn publish_leave(&self, channel: &str, info: ClientInfo) {
+        deliver_push(&self.hub, channel, PushType::Leave, &Leave { info });
+    }
+
     /// Create a per-connection client bound to this node, writing to `tx`.
     pub fn new_client(self: &Arc<Self>, tx: Sender<Out>, proto: ProtocolType) -> Client {
         Client::new(self.clone(), tx, proto)
@@ -75,17 +155,23 @@ impl Node {
     }
 }
 
-/// Encode a publication push once per protocol and fan it out to all subscribers
-/// of `channel`, sending each subscriber the frame matching its protocol.
+/// Route a client/API publication into local fan-out as a Publication push.
 fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<ClientInfo>) {
     let publication = Publication {
         data: Some(Raw::from_bytes(data)),
         info,
         ..Default::default()
     };
-    // Encode once per protocol (lazily simple: build both; either may be unused).
-    let json_frame = make_push_frame(ProtocolType::Json, channel, &publication);
-    let pb_frame = make_push_frame(ProtocolType::Protobuf, channel, &publication);
+    deliver_push(hub, channel, PushType::Publication, &publication);
+}
+
+/// Encode `inner` (a Publication/Join/Leave) into a push frame once per protocol
+/// and fan it out to every subscriber of `channel`, sending each the frame
+/// matching its protocol. A slow/full or gone consumer is dropped, never
+/// blocking the broadcaster.
+fn deliver_push<T: Serialize + WireType>(hub: &Hub, channel: &str, push_type: PushType, inner: &T) {
+    let json_frame = make_push_frame(ProtocolType::Json, channel, push_type, inner);
+    let pb_frame = make_push_frame(ProtocolType::Protobuf, channel, push_type, inner);
 
     for handle in hub.subscribers(channel) {
         let frame = match handle.proto {
@@ -96,25 +182,22 @@ fn deliver_publication(hub: &Hub, channel: &str, data: &[u8], info: Option<Clien
         match handle.tx.try_send(Out::Frame(bytes.clone())) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Closed(_)) => {
-                // Slow or gone consumer: drop it so it cannot block the broadcaster.
-                // (The queue is full, so a DisconnectSlow close frame cannot be
-                // queued; dropping the sender ends the writer task and closes the
-                // socket.)
                 hub.remove(&handle.id);
             }
         }
     }
 }
 
-/// Build the full push frame (Reply with id==0 carrying the encoded Publication
-/// Push) for one protocol.
-fn make_push_frame(
+/// Build the full push frame (Reply with id==0 carrying the encoded Push) for one
+/// protocol.
+fn make_push_frame<T: Serialize + WireType>(
     proto: ProtocolType,
     channel: &str,
-    publication: &Publication,
+    push_type: PushType,
+    inner: &T,
 ) -> Option<Vec<u8>> {
-    let data = codec::encode_result(proto, publication).ok()?;
-    let push = Push::new(PushType::Publication, channel, Some(data));
+    let data = codec::encode_result(proto, inner).ok()?;
+    let push = Push::new(push_type, channel, Some(data));
     codec::encode_push_frame(proto, &push).ok()
 }
 

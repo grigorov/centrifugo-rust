@@ -134,6 +134,48 @@ pub struct RefreshResult {
     pub ttl: u32,
 }
 
+// ---- Presence ----
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PresenceRequest {
+    #[serde(default)]
+    pub channel: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PresenceResult {
+    #[serde(default)]
+    pub presence: std::collections::HashMap<String, ClientInfo>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PresenceStatsRequest {
+    #[serde(default)]
+    pub channel: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PresenceStatsResult {
+    #[serde(default, rename = "num_clients")]
+    pub num_clients: u32,
+    #[serde(default, rename = "num_users")]
+    pub num_users: u32,
+}
+
+// ---- Join / Leave (push payloads) ----
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Join {
+    #[serde(default)]
+    pub info: ClientInfo,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Leave {
+    #[serde(default)]
+    pub info: ClientInfo,
+}
+
 // ---- Inner objects ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

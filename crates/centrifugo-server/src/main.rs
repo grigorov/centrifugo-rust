@@ -8,7 +8,7 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::TokenVerifier;
-use centrifugo_core::Node;
+use centrifugo_core::{ChannelOptions, Node};
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
@@ -46,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
                 token_hmac_secret_key: args.token_hmac_secret_key,
                 token_rsa_public_key: args.token_rsa_public_key,
                 token_ecdsa_public_key: args.token_ecdsa_public_key,
+                presence: args.presence,
+                join_leave: args.join_leave,
+                presence_disable_for_client: args.presence_disable_for_client,
             };
             let rsa_pem = read_pem_opt(&cfg.token_rsa_public_key)?;
             let ecdsa_pem = read_pem_opt(&cfg.token_ecdsa_public_key)?;
@@ -55,7 +58,12 @@ async fn main() -> anyhow::Result<()> {
                 ecdsa_pem.as_deref(),
             )
             .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?;
-            let node = Node::new_with(Arc::new(verifier), cfg.client_insecure);
+            let opts = ChannelOptions {
+                presence: cfg.presence,
+                join_leave: cfg.join_leave,
+                presence_disable_for_client: cfg.presence_disable_for_client,
+            };
+            let node = Node::new_with(Arc::new(verifier), cfg.client_insecure, opts);
             let app = http::router(Arc::clone(&node));
             http::serve(cfg.socket_addr(), app).await
         }
