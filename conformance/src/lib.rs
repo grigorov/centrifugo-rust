@@ -19,6 +19,8 @@ pub struct Server {
     child: Child,
     pub port: u16,
     pub http: String,
+    /// gRPC API port when started via [`Server::start_grpc`].
+    pub grpc_port: Option<u16>,
 }
 
 /// Ensure the `centrifugo` binary is freshly built before any test spawns it.
@@ -60,6 +62,26 @@ impl Server {
         Server::start_spawn(pick_port(), extra_args).await
     }
 
+    /// Spawn with the gRPC API enabled. Injects `grpc_api`/`grpc_api_port`/
+    /// `grpc_api_key` into the given JSON config so the chosen (free) gRPC port
+    /// is known; `grpc_port` is then populated. The same `config_json` + key can
+    /// be passed to `Oracle::start_grpc` for a golden.
+    pub async fn start_grpc(config_json: &str, grpc_key: &str) -> Server {
+        let port = pick_port();
+        let grpc_port = pick_port();
+        let cfg = inject_grpc(config_json, grpc_port, grpc_key);
+        let cfg_path = std::env::temp_dir().join(format!("centrifugo-rust-grpc-{port}.json"));
+        std::fs::write(&cfg_path, cfg).expect("write rust grpc config");
+        let mut s = Server::start_spawn(port, &["-c", cfg_path.to_str().unwrap()]).await;
+        s.grpc_port = Some(grpc_port);
+        s
+    }
+
+    /// gRPC endpoint URL (requires a server started via [`Server::start_grpc`]).
+    pub fn grpc_addr(&self) -> String {
+        format!("http://127.0.0.1:{}", self.grpc_port.expect("grpc enabled"))
+    }
+
     async fn start_spawn(port: u16, extra_args: &[&str]) -> Server {
         ensure_binary_built();
         let mut cmd = Command::new(bin_path());
@@ -74,6 +96,7 @@ impl Server {
             child,
             port,
             http: format!("http://127.0.0.1:{port}"),
+            grpc_port: None,
         };
         let client = reqwest::Client::new();
         for _ in 0..200 {
@@ -111,6 +134,22 @@ fn bin_path() -> std::path::PathBuf {
 pub(crate) fn pick_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
+}
+
+/// Merge `grpc_api`/`grpc_api_port`/`grpc_api_key` into a JSON config object so
+/// both harnesses configure the gRPC API the same way (Go and Rust read the same
+/// keys). Returns the serialized config.
+pub(crate) fn inject_grpc(config_json: &str, grpc_port: u16, grpc_key: &str) -> String {
+    let mut cfg: serde_json::Value =
+        serde_json::from_str(config_json).unwrap_or_else(|_| serde_json::json!({}));
+    let obj = cfg.as_object_mut().expect("config must be a JSON object");
+    obj.insert("grpc_api".into(), serde_json::Value::Bool(true));
+    obj.insert("grpc_api_port".into(), grpc_port.into());
+    obj.insert(
+        "grpc_api_key".into(),
+        serde_json::Value::String(grpc_key.into()),
+    );
+    cfg.to_string()
 }
 
 /// POST a body to `<http_base>/api` with an apikey header; return the first

@@ -3,6 +3,7 @@
 mod api;
 mod cli;
 mod config;
+mod grpc;
 mod http;
 mod ws;
 
@@ -57,11 +58,23 @@ async fn main() -> anyhow::Result<()> {
                 key: settings.api_key.clone(),
                 insecure: settings.api_insecure,
             };
+            let grpc = settings
+                .grpc_api
+                .then(|| (settings.grpc_socket_addr(), settings.grpc_api_key.clone()));
             let node = Node::new_with(
                 Arc::new(verifier),
                 settings.client_insecure,
                 settings.namespaces,
             );
+            if let Some((grpc_addr, grpc_key)) = grpc {
+                let grpc_node = Arc::clone(&node);
+                tokio::spawn(async move {
+                    if let Err(e) = grpc::serve(grpc_node, grpc_addr, grpc_key).await {
+                        tracing::error!("grpc server error: {e}");
+                    }
+                });
+                tracing::info!("gRPC API listening on {grpc_addr}");
+            }
             let app = http::router(Arc::clone(&node), api_auth);
             http::serve(addr, app).await
         }

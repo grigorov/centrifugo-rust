@@ -63,4 +63,13 @@ pub struct ServeArgs {
     /// Disable HTTP API auth.
     #[arg(long = "api_insecure")]
     pub api_insecure: bool,
+    /// Enable the gRPC server API.
+    #[arg(long = "grpc_api")]
+    pub grpc_api: bool,
+    /// TCP port for the gRPC server API.
+    #[arg(long = "grpc_api_port", default_value_t = 10000)]
+    pub grpc_api_port: u16,
+    /// API key required in `authorization: apikey <KEY>` gRPC metadata (empty = open).
+    #[arg(long = "grpc_api_key", default_value = "")]
+    pub grpc_api_key: String,
 }

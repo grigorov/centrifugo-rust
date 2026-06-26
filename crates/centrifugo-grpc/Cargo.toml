@@ -1,0 +1,17 @@
+[package]
+name = "centrifugo-grpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Codegen-only crate: the generated `api.Centrifugo` tonic service (server +
+# client) + message types, shared by centrifugo-server (impl) and the
+# conformance harness (client). Pure-Rust codegen (protox, no protoc).
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"
+protox = "0.7"

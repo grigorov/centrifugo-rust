@@ -20,6 +20,9 @@ pub struct Settings {
     pub token_ecdsa_public_key: String,
     pub api_key: String,
     pub api_insecure: bool,
+    pub grpc_api: bool,
+    pub grpc_api_port: u16,
+    pub grpc_api_key: String,
     pub namespaces: Namespaces,
 }
 
@@ -28,6 +31,13 @@ impl Settings {
         format!("{}:{}", self.address, self.port)
             .parse()
             .expect("valid socket address")
+    }
+
+    /// gRPC API bind address — same host as the HTTP listener, `grpc_api_port`.
+    pub fn grpc_socket_addr(&self) -> SocketAddr {
+        format!("{}:{}", self.address, self.grpc_api_port)
+            .parse()
+            .expect("valid grpc socket address")
     }
 
     /// Build settings from CLI flags (single default namespace, no named ones).
@@ -41,6 +51,9 @@ impl Settings {
             token_ecdsa_public_key: a.token_ecdsa_public_key.clone(),
             api_key: a.api_key.clone(),
             api_insecure: a.api_insecure,
+            grpc_api: a.grpc_api,
+            grpc_api_port: a.grpc_api_port,
+            grpc_api_key: a.grpc_api_key.clone(),
             namespaces: Namespaces {
                 default: ChannelOptions {
                     presence: a.presence,
@@ -77,6 +90,9 @@ impl Settings {
             token_ecdsa_public_key: fc.token_ecdsa_public_key,
             api_key: fc.api_key,
             api_insecure: fc.api_insecure,
+            grpc_api: fc.grpc_api,
+            grpc_api_port: fc.grpc_api_port,
+            grpc_api_key: fc.grpc_api_key,
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -135,6 +151,9 @@ fn default_ns_boundary() -> String {
 fn default_private_prefix() -> String {
     "$".into()
 }
+fn default_grpc_port() -> u16 {
+    10000
+}
 
 #[derive(Deserialize, Default)]
 struct FileConfig {
@@ -150,6 +169,12 @@ struct FileConfig {
     api_key: String,
     #[serde(default)]
     api_insecure: bool,
+    #[serde(default)]
+    grpc_api: bool,
+    #[serde(default = "default_grpc_port")]
+    grpc_api_port: u16,
+    #[serde(default)]
+    grpc_api_key: String,
     #[serde(flatten)]
     options: ChannelOptionsCfg,
     #[serde(default = "default_ns_boundary")]

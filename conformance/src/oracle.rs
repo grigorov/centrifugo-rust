@@ -5,12 +5,14 @@
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use crate::pick_port;
+use crate::{inject_grpc, pick_port};
 
 pub struct Oracle {
     child: Child,
     pub port: u16,
     pub http: String,
+    /// gRPC API port when started via [`Oracle::start_grpc`].
+    pub grpc_port: Option<u16>,
 }
 
 fn oracle_bin() -> std::path::PathBuf {
@@ -69,8 +71,36 @@ impl Oracle {
         spawn_and_wait(cmd, port).await
     }
 
+    /// Start the Go oracle with the gRPC API enabled (config-file based, since Go
+    /// exposes `grpc_api*` only via config). Injects a free `grpc_api_port` and
+    /// populates `grpc_port`. Mirrors [`crate::Server::start_grpc`].
+    pub async fn start_grpc(config_json: &str, grpc_key: &str) -> Option<Oracle> {
+        let bin = oracle_bin();
+        if !oracle_present(&bin) {
+            return None;
+        }
+        let port = pick_port();
+        let grpc_port = pick_port();
+        let cfg = inject_grpc(config_json, grpc_port, grpc_key);
+        let cfg_path = std::env::temp_dir().join(format!("centrifugo-oracle-grpc-{port}.json"));
+        if std::fs::write(&cfg_path, cfg).is_err() {
+            return None;
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.arg("-c").arg(&cfg_path);
+        cmd.args(base_args(port));
+        let mut o = spawn_and_wait(cmd, port).await?;
+        o.grpc_port = Some(grpc_port);
+        Some(o)
+    }
+
     pub fn ws_url(&self) -> String {
         format!("ws://127.0.0.1:{}/connection/websocket", self.port)
+    }
+
+    /// gRPC endpoint URL (requires an oracle started via [`Oracle::start_grpc`]).
+    pub fn grpc_addr(&self) -> String {
+        format!("http://127.0.0.1:{}", self.grpc_port.expect("grpc enabled"))
     }
 }
 
@@ -109,6 +139,7 @@ async fn spawn_and_wait(mut cmd: Command, port: u16) -> Option<Oracle> {
         child,
         port,
         http: format!("http://127.0.0.1:{port}"),
+        grpc_port: None,
     };
     let client = reqwest::Client::new();
     for _ in 0..200 {

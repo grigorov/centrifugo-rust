@@ -7,7 +7,9 @@ publish = false
 
 [dependencies]
 centrifugo-protocol = { path = "../crates/centrifugo-protocol" }
+centrifugo-grpc = { path = "../crates/centrifugo-grpc" }
 prost = "0.13"
+tonic = "0.12"
 jsonwebtoken = "9"
 tokio = { workspace = true }
 serde_json = { workspace = true }
