@@ -37,6 +37,47 @@ impl Settings {
             .expect("valid socket address")
     }
 
+    /// Overlay `CENTRIFUGO_*` environment variables as a fallback **below** flags
+    /// and the config file (the spec's flags > file > env precedence): a value
+    /// already set by a flag/file is kept; an unset one is filled from env.
+    pub fn apply_env(&mut self) {
+        fn env(key: &str) -> Option<String> {
+            std::env::var(format!("CENTRIFUGO_{key}"))
+                .ok()
+                .filter(|s| !s.is_empty())
+        }
+        fn fill(field: &mut String, key: &str) {
+            if field.is_empty() {
+                if let Some(v) = env(key) {
+                    *field = v;
+                }
+            }
+        }
+        fill(&mut self.token_hmac_secret_key, "TOKEN_HMAC_SECRET_KEY");
+        fill(&mut self.token_rsa_public_key, "TOKEN_RSA_PUBLIC_KEY");
+        fill(&mut self.token_ecdsa_public_key, "TOKEN_ECDSA_PUBLIC_KEY");
+        fill(&mut self.token_jwks_public_endpoint, "TOKEN_JWKS_PUBLIC_ENDPOINT");
+        fill(&mut self.api_key, "API_KEY");
+        fill(&mut self.proxy_connect_endpoint, "PROXY_CONNECT_ENDPOINT");
+        if !self.client_insecure && env("CLIENT_INSECURE").as_deref() == Some("true") {
+            self.client_insecure = true;
+        }
+        if !self.api_insecure && env("API_INSECURE").as_deref() == Some("true") {
+            self.api_insecure = true;
+        }
+        // Engine/redis address: overlay only when still at the built-in default.
+        if self.engine == "memory" {
+            if let Some(v) = env("ENGINE") {
+                self.engine = v;
+            }
+        }
+        if self.redis_address == "127.0.0.1:6379" {
+            if let Some(v) = env("REDIS_ADDRESS") {
+                self.redis_address = v;
+            }
+        }
+    }
+
     /// gRPC API bind address — same host as the HTTP listener, `grpc_api_port`.
     pub fn grpc_socket_addr(&self) -> SocketAddr {
         format!("{}:{}", self.address, self.grpc_api_port)

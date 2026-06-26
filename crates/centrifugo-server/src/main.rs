@@ -121,10 +121,11 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
-            let settings = match &args.config {
+            let mut settings = match &args.config {
                 Some(path) => Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args)?,
                 None => Settings::from_args(&args),
             };
+            settings.apply_env();
             let rsa_pem = read_pem_opt(&settings.token_rsa_public_key)?;
             let ecdsa_pem = read_pem_opt(&settings.token_ecdsa_public_key)?;
             let verifier = Arc::new(

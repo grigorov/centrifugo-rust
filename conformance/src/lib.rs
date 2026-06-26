@@ -62,6 +62,12 @@ impl Server {
         Server::start_spawn(pick_port(), extra_args).await
     }
 
+    /// Spawn with `CENTRIFUGO_*` environment variables set (exercises the env
+    /// config overlay) plus extra `serve` args.
+    pub async fn start_env(env: &[(&str, &str)], extra_args: &[&str]) -> Server {
+        Server::start_spawn_env(pick_port(), extra_args, env).await
+    }
+
     /// Spawn with the gRPC API enabled. Injects `grpc_api`/`grpc_api_port`/
     /// `grpc_api_key` into the given JSON config so the chosen (free) gRPC port
     /// is known; `grpc_port` is then populated. The same `config_json` + key can
@@ -101,10 +107,17 @@ impl Server {
     }
 
     async fn start_spawn(port: u16, extra_args: &[&str]) -> Server {
+        Server::start_spawn_env(port, extra_args, &[]).await
+    }
+
+    async fn start_spawn_env(port: u16, extra_args: &[&str], env: &[(&str, &str)]) -> Server {
         ensure_binary_built();
         let mut cmd = Command::new(bin_path());
         cmd.args(["serve", "--port", &port.to_string()]);
         cmd.args(extra_args);
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         let child = cmd
             .spawn()
             .expect("spawn centrifugo binary (run `cargo build -p centrifugo-server` first)");
