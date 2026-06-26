@@ -1,0 +1,22 @@
+[package]
+name = "centrifugo-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "centrifugo"
+path = "src/main.rs"
+
+[dependencies]
+centrifugo-protocol = { path = "../centrifugo-protocol" }
+centrifugo-core = { path = "../centrifugo-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
