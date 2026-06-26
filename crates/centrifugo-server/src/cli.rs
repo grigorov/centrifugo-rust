@@ -11,6 +11,9 @@ pub struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// The CLI command enum is built once at startup; the Serve/Version size gap is
+// irrelevant and boxing fights the clap derive.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Run the server.
     Serve(ServeArgs),

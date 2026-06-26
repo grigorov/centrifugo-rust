@@ -5,7 +5,7 @@
 //! plain `cargo test --workspace` always exercises current code even though the
 //! binary is spawned by path rather than via a cargo dependency.
 
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -82,6 +82,24 @@ impl Server {
         format!("http://127.0.0.1:{}", self.grpc_port.expect("grpc enabled"))
     }
 
+    /// Spawn a node backed by the Redis engine at `redis_addr`. Injects
+    /// `engine`/`redis_address` into the JSON config so several nodes can share
+    /// one Redis instance to form a cluster.
+    pub async fn start_redis(redis_addr: &str, config_json: &str) -> Server {
+        let port = pick_port();
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(config_json).unwrap_or_else(|_| serde_json::json!({}));
+        let obj = cfg.as_object_mut().expect("config must be a JSON object");
+        obj.insert("engine".into(), serde_json::Value::String("redis".into()));
+        obj.insert(
+            "redis_address".into(),
+            serde_json::Value::String(redis_addr.into()),
+        );
+        let cfg_path = std::env::temp_dir().join(format!("centrifugo-rust-redis-{port}.json"));
+        std::fs::write(&cfg_path, cfg.to_string()).expect("write rust redis config");
+        Server::start_spawn(port, &["-c", cfg_path.to_str().unwrap()]).await
+    }
+
     async fn start_spawn(port: u16, extra_args: &[&str]) -> Server {
         ensure_binary_built();
         let mut cmd = Command::new(bin_path());
@@ -129,6 +147,49 @@ fn bin_path() -> std::path::PathBuf {
     p.push("debug");
     p.push("centrifugo");
     p
+}
+
+/// A throwaway `redis-server` for multi-node tests, killed on drop. Returns
+/// `None` (so the test skips, like the Go oracle) when `redis-server` is absent.
+/// Persistence is disabled so it leaves nothing behind.
+pub struct Redis {
+    child: Child,
+    pub addr: String,
+}
+
+impl Redis {
+    pub async fn start() -> Option<Redis> {
+        let port = pick_port();
+        let addr = format!("127.0.0.1:{port}");
+        let child = Command::new("redis-server")
+            .args(["--port", &port.to_string(), "--save", "", "--appendonly", "no"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let child = match child {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("redis-server absent; skipping Redis differential test");
+                return None;
+            }
+        };
+        let redis = Redis { child, addr };
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(&redis.addr).is_ok() {
+                return Some(redis);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        eprintln!("redis did not become reachable; skipping");
+        None
+    }
+}
+
+impl Drop for Redis {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 pub(crate) fn pick_port() -> u16 {
