@@ -4,8 +4,9 @@
 Cargo.lock.orig
 *.rs.bk
 
-# Go oracle build artifacts
+# Go oracle build artifacts (cloned source + built binary)
 /conformance/go-oracle/bin
+/conformance/go-oracle/src
 /conformance/go-oracle/centrifugo
 *.test
 

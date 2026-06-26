@@ -1,0 +1,17 @@
+[package]
+name = "conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.21"
+
+[dev-dependencies]
+tokio = { workspace = true }
