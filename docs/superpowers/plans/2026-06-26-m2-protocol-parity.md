@@ -40,7 +40,14 @@ This keeps one domain type set, isolates wire concerns in two codec impls, and s
 ## Tasks (TDD; commit after each)
 
 ### M2.1 — prost codegen + `pb` module
-- `build.rs`: `prost_build::compile_protos(&["proto/client.proto"], &["proto"])`. Add `prost`, `prost-build` (build-dep) to Cargo.toml. `pb.rs`: `include!(concat!(env!("OUT_DIR"), "/protocol.rs"));`.
+- **No `protoc` on this machine and downloads are flaky — use the pure-Rust `protox` compiler**, not `prost_build::compile_protos` (which shells out to `protoc`). `build.rs`:
+  ```rust
+  let fds = protox::compile(["proto/client.proto"], ["proto"]).unwrap();
+  prost_build::Config::new()
+      .compile_fds(fds)  // or .file_descriptor_set + compile
+      .unwrap();
+  ```
+  Build-deps: `prost-build`, `protox`. Runtime dep: `prost`. `pb.rs`: `include!(concat!(env!("OUT_DIR"), "/protocol.rs"));`. (Confirm the exact `protox`/`prost-build` API at execution; alternative: `protox::compile` → write FDS → `prost_build::Config::compile_protos_with_field_attributes`.)
 - Test: a unit test encodes a `pb::ConnectResult{client,version}` and decodes it back (prost round-trip).
 - Commit.
 
