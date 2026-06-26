@@ -10,7 +10,8 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::TokenVerifier;
-use centrifugo_core::Node;
+use centrifugo_core::{make_route, Engine, Hub, Node};
+use centrifugo_redis::RedisEngine;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
@@ -47,12 +48,14 @@ async fn main() -> anyhow::Result<()> {
             };
             let rsa_pem = read_pem_opt(&settings.token_rsa_public_key)?;
             let ecdsa_pem = read_pem_opt(&settings.token_ecdsa_public_key)?;
-            let verifier = TokenVerifier::new(
-                &settings.token_hmac_secret_key,
-                rsa_pem.as_deref(),
-                ecdsa_pem.as_deref(),
-            )
-            .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?;
+            let verifier = Arc::new(
+                TokenVerifier::new(
+                    &settings.token_hmac_secret_key,
+                    rsa_pem.as_deref(),
+                    ecdsa_pem.as_deref(),
+                )
+                .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?,
+            );
             let addr = settings.socket_addr();
             let api_auth = api::ApiAuth {
                 key: settings.api_key.clone(),
@@ -61,11 +64,27 @@ async fn main() -> anyhow::Result<()> {
             let grpc = settings
                 .grpc_api
                 .then(|| (settings.grpc_socket_addr(), settings.grpc_api_key.clone()));
-            let node = Node::new_with(
-                Arc::new(verifier),
-                settings.client_insecure,
-                settings.namespaces,
-            );
+            let node = match settings.engine.as_str() {
+                "redis" => {
+                    let hub = Arc::new(Hub::new());
+                    let engine: Arc<dyn Engine> = Arc::new(
+                        RedisEngine::connect(&settings.redis_address, make_route(&hub))
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("connect redis at {}: {e}", settings.redis_address)
+                            })?,
+                    );
+                    tracing::info!("using redis engine at {}", settings.redis_address);
+                    Node::new_with_engine(
+                        hub,
+                        engine,
+                        verifier,
+                        settings.client_insecure,
+                        settings.namespaces,
+                    )
+                }
+                _ => Node::new_with(verifier, settings.client_insecure, settings.namespaces),
+            };
             if let Some((grpc_addr, grpc_key)) = grpc {
                 let grpc_node = Arc::clone(&node);
                 tokio::spawn(async move {

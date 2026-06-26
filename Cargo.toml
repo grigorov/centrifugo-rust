@@ -5,6 +5,7 @@ members = [
     "crates/centrifugo-auth",
     "crates/centrifugo-core",
     "crates/centrifugo-grpc",
+    "crates/centrifugo-redis",
     "crates/centrifugo-server",
     "conformance",
 ]

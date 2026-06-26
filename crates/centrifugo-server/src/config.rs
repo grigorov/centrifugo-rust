@@ -23,6 +23,8 @@ pub struct Settings {
     pub grpc_api: bool,
     pub grpc_api_port: u16,
     pub grpc_api_key: String,
+    pub engine: String,
+    pub redis_address: String,
     pub namespaces: Namespaces,
 }
 
@@ -54,6 +56,8 @@ impl Settings {
             grpc_api: a.grpc_api,
             grpc_api_port: a.grpc_api_port,
             grpc_api_key: a.grpc_api_key.clone(),
+            engine: a.engine.clone(),
+            redis_address: a.redis_address.clone(),
             namespaces: Namespaces {
                 default: ChannelOptions {
                     presence: a.presence,
@@ -93,6 +97,8 @@ impl Settings {
             grpc_api: fc.grpc_api,
             grpc_api_port: fc.grpc_api_port,
             grpc_api_key: fc.grpc_api_key,
+            engine: fc.engine,
+            redis_address: fc.redis_address,
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -154,6 +160,12 @@ fn default_private_prefix() -> String {
 fn default_grpc_port() -> u16 {
     10000
 }
+fn default_engine() -> String {
+    "memory".into()
+}
+fn default_redis_address() -> String {
+    "127.0.0.1:6379".into()
+}
 
 #[derive(Deserialize, Default)]
 struct FileConfig {
@@ -175,6 +187,10 @@ struct FileConfig {
     grpc_api_port: u16,
     #[serde(default)]
     grpc_api_key: String,
+    #[serde(default = "default_engine")]
+    engine: String,
+    #[serde(default = "default_redis_address")]
+    redis_address: String,
     #[serde(flatten)]
     options: ChannelOptionsCfg,
     #[serde(default = "default_ns_boundary")]

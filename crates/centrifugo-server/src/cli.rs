@@ -72,4 +72,10 @@ pub struct ServeArgs {
     /// API key required in `authorization: apikey <KEY>` gRPC metadata (empty = open).
     #[arg(long = "grpc_api_key", default_value = "")]
     pub grpc_api_key: String,
+    /// Engine backing pub/sub, history and presence: `memory` or `redis`.
+    #[arg(long = "engine", default_value = "memory")]
+    pub engine: String,
+    /// Redis address (`host:port` or a full `redis://` URL) when `engine=redis`.
+    #[arg(long = "redis_address", default_value = "127.0.0.1:6379")]
+    pub redis_address: String,
 }

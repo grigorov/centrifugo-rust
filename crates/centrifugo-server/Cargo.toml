@@ -13,6 +13,7 @@ centrifugo-protocol = { path = "../centrifugo-protocol" }
 centrifugo-core = { path = "../centrifugo-core" }
 centrifugo-auth = { path = "../centrifugo-auth" }
 centrifugo-grpc = { path = "../centrifugo-grpc" }
+centrifugo-redis = { path = "../centrifugo-redis" }
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
