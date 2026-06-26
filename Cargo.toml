@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/centrifugo-protocol",
+    "crates/centrifugo-auth",
     "crates/centrifugo-core",
     "crates/centrifugo-server",
     "conformance",
