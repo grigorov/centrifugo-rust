@@ -1,8 +1,9 @@
 //! Black-box conformance harness: spawn the `centrifugo` binary, wait until it
 //! is healthy, and drive it over the real wire (WebSocket + JSON).
 //!
-//! Tests depend on the binary being built first (`cargo build -p
-//! centrifugo-server`); `cargo test --workspace` builds all bins before tests.
+//! `Server::start` rebuilds the binary first (see `ensure_binary_built`), so a
+//! plain `cargo test --workspace` always exercises current code even though the
+//! binary is spawned by path rather than via a cargo dependency.
 
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -11,6 +12,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+pub mod oracle;
+
 /// A spawned Rust centrifugo server, killed on drop.
 pub struct Server {
     child: Child,
@@ -18,19 +21,45 @@ pub struct Server {
     pub http: String,
 }
 
+/// Ensure the `centrifugo` binary is freshly built before any test spawns it.
+/// The conformance crate spawns the binary by path, so there is no cargo
+/// dependency edge that would rebuild it; without this, `cargo test` can run
+/// against a stale binary. Runs once per test process; a no-op when current.
+fn ensure_binary_built() {
+    use std::sync::Once;
+    static BUILD: Once = Once::new();
+    BUILD.call_once(|| {
+        let status = Command::new(env!("CARGO"))
+            .args(["build", "-p", "centrifugo-server"])
+            .status()
+            .expect("run `cargo build -p centrifugo-server`");
+        assert!(status.success(), "failed to build centrifugo-server");
+    });
+}
+
 impl Server {
+    // The child is owned by `Server`, whose `Drop` calls kill()+wait(); on the
+    // health-timeout panic path it is dropped during unwind, so it is never a
+    // true zombie.
     pub async fn start() -> Server {
+        ensure_binary_built();
         let port = pick_port();
         let child = Command::new(bin_path())
             .args(["serve", "--port", &port.to_string(), "--client-insecure"])
             .spawn()
             .expect("spawn centrifugo binary (run `cargo build -p centrifugo-server` first)");
-        let http = format!("http://127.0.0.1:{port}");
+        // Own the child immediately so the panic path drops `Server` (kill+wait)
+        // rather than leaking the process.
+        let server = Server {
+            child,
+            port,
+            http: format!("http://127.0.0.1:{port}"),
+        };
         let client = reqwest::Client::new();
         for _ in 0..100 {
-            if let Ok(resp) = client.get(format!("{http}/health")).send().await {
+            if let Ok(resp) = client.get(format!("{}/health", server.http)).send().await {
                 if resp.status().is_success() {
-                    return Server { child, port, http };
+                    return server;
                 }
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -59,9 +88,32 @@ fn bin_path() -> std::path::PathBuf {
     p
 }
 
-fn pick_port() -> u16 {
+pub(crate) fn pick_port() -> u16 {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     l.local_addr().unwrap().port()
+}
+
+/// Reduce a JSON value to its structural "shape": object keys (sorted) and value
+/// *types*, discarding leaf values. Lets differential tests compare structure
+/// against the Go oracle while ignoring volatile values (client ids, epochs).
+pub fn key_shape(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(m) => {
+            let mut out = serde_json::Map::new();
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            for k in keys {
+                out.insert(k.clone(), key_shape(&m[k]));
+            }
+            Value::Object(out)
+        }
+        Value::Array(a) => Value::Array(a.iter().map(key_shape).collect()),
+        Value::String(_) => Value::String("<str>".into()),
+        Value::Number(_) => Value::String("<num>".into()),
+        Value::Bool(_) => Value::String("<bool>".into()),
+        Value::Null => Value::String("<null>".into()),
+    }
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -89,6 +141,12 @@ impl WsJsonClient {
             .as_str()
             .expect("connect result client id")
             .to_string()
+    }
+
+    /// Send a CONNECT command and return the full reply value.
+    pub async fn connect_reply(&mut self) -> serde_json::Value {
+        self.send_raw(r#"{"id":1,"params":{}}"#).await;
+        self.next_json().await
     }
 
     pub async fn subscribe(&mut self, id: u32, channel: &str) -> serde_json::Value {
