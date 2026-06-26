@@ -8,7 +8,8 @@ use prost::Message as _;
 use crate::command::encode_raw;
 use crate::messages::{
     ConnectRequest, ConnectResult, PingResult, Publication, PublishRequest, PublishResult,
-    SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{json, pb, Command, MethodType, Push, Reply};
@@ -197,6 +198,8 @@ wire!(PublishResult, pb::PublishResult);
 wire!(UnsubscribeRequest, pb::UnsubscribeRequest);
 wire!(UnsubscribeResult, pb::UnsubscribeResult);
 wire!(PingResult, pb::PingResult);
+wire!(RefreshRequest, pb::RefreshRequest);
+wire!(RefreshResult, pb::RefreshResult);
 wire!(Publication, pb::Publication);
 
 /// Decode a command's params into a typed request (missing params -> default).

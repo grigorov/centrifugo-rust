@@ -219,6 +219,7 @@ name = "centrifugo-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "centrifugo-auth",
  "centrifugo-protocol",
  "parking_lot",
  "serde",
@@ -246,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "centrifugo-auth",
  "centrifugo-core",
  "centrifugo-protocol",
  "clap",
@@ -316,6 +318,7 @@ dependencies = [
  "anyhow",
  "centrifugo-protocol",
  "futures-util",
+ "jsonwebtoken",
  "prost",
  "reqwest",
  "serde_json",

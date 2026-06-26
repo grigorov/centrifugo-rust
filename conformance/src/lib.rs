@@ -41,11 +41,19 @@ impl Server {
     // The child is owned by `Server`, whose `Drop` calls kill()+wait(); on the
     // health-timeout panic path it is dropped during unwind, so it is never a
     // true zombie.
+    /// Spawn in insecure mode (no token required).
     pub async fn start() -> Server {
+        Server::start_with(&["--client_insecure"]).await
+    }
+
+    /// Spawn with explicit extra `serve` args (e.g. `--token_hmac_secret_key secret`).
+    pub async fn start_with(extra_args: &[&str]) -> Server {
         ensure_binary_built();
         let port = pick_port();
-        let child = Command::new(bin_path())
-            .args(["serve", "--port", &port.to_string(), "--client-insecure"])
+        let mut cmd = Command::new(bin_path());
+        cmd.args(["serve", "--port", &port.to_string()]);
+        cmd.args(extra_args);
+        let child = cmd
             .spawn()
             .expect("spawn centrifugo binary (run `cargo build -p centrifugo-server` first)");
         // Own the child immediately so the panic path drops `Server` (kill+wait)
@@ -146,6 +154,22 @@ impl WsJsonClient {
     /// Send a CONNECT command and return the full reply value.
     pub async fn connect_reply(&mut self) -> serde_json::Value {
         self.send_raw(r#"{"id":1,"params":{}}"#).await;
+        self.next_json().await
+    }
+
+    /// Send a CONNECT command carrying a JWT; return the full reply value.
+    pub async fn connect_with_token(&mut self, token: &str) -> serde_json::Value {
+        self.send_raw(&format!(r#"{{"id":1,"params":{{"token":"{token}"}}}}"#))
+            .await;
+        self.next_json().await
+    }
+
+    /// Send a REFRESH command (method 10) with a new token; return the reply.
+    pub async fn refresh(&mut self, id: u32, token: &str) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":10,"params":{{"token":"{token}"}}}}"#
+        ))
+        .await;
         self.next_json().await
     }
 

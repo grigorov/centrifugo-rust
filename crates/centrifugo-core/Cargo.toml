@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 centrifugo-protocol = { path = "../centrifugo-protocol" }
+centrifugo-auth = { path = "../centrifugo-auth" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

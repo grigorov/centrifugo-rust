@@ -5,10 +5,12 @@
 
 use std::sync::Arc;
 
+use centrifugo_auth::VerifyError;
 use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
-    ClientInfo, ConnectResult, PingResult, PublishRequest, PublishResult, SubscribeRequest,
-    SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    ClientInfo, ConnectRequest, ConnectResult, PingResult, PublishRequest, PublishResult,
+    RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
@@ -47,6 +49,10 @@ pub struct Client {
     pub user: String,
     proto: ProtocolType,
     authenticated: bool,
+    /// Connection info bytes from the token (becomes ClientInfo.conn_info).
+    conn_info: Option<Vec<u8>>,
+    /// Token expiry (unix seconds); 0 means no expiry.
+    expire_at: i64,
     node: Arc<Node>,
     tx: Sender<Out>,
 }
@@ -58,6 +64,8 @@ impl Client {
             user: String::new(),
             proto,
             authenticated: false,
+            conn_info: None,
+            expire_at: 0,
             node,
             tx,
         }
@@ -70,34 +78,72 @@ impl Client {
         if !self.authenticated && cmd.method != MethodType::Connect {
             return CommandOutcome::disconnect(Disconnect::bad_request());
         }
-        let replies = match cmd.method {
+        match cmd.method {
+            // CONNECT may itself decide to disconnect (invalid token), so it
+            // returns its own outcome.
             MethodType::Connect => self.on_connect(cmd),
-            MethodType::Subscribe => self.on_subscribe(cmd),
-            MethodType::Publish => self.on_publish(cmd),
-            MethodType::Unsubscribe => self.on_unsubscribe(cmd),
-            MethodType::Ping => vec![ok_reply(self.proto, cmd.id, &PingResult {})],
+            MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd)),
+            MethodType::Publish => CommandOutcome::replies(self.on_publish(cmd)),
+            MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd)),
+            MethodType::Ping => {
+                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PingResult {})])
+            }
+            MethodType::Refresh => self.on_refresh(cmd),
             // SEND is fire-and-forget: no reply.
-            MethodType::Send => vec![],
+            MethodType::Send => CommandOutcome::replies(vec![]),
+            // RPC with no registered handler -> method not found (matches
+            // centrifugo's OnRPC).
+            MethodType::Rpc => {
+                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())])
+            }
             // Features that arrive in later milestones report "not available"
-            // (matching Go when the feature/handler is absent) rather than
-            // "method not found".
+            // (matching Go when the feature/handler is absent).
             MethodType::Presence
             | MethodType::PresenceStats
             | MethodType::History
-            | MethodType::Rpc
-            | MethodType::Refresh
-            | MethodType::SubRefresh => vec![Reply::err(cmd.id, Error::not_available())],
-        };
-        CommandOutcome::replies(replies)
+            | MethodType::SubRefresh => {
+                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())])
+            }
+        }
     }
 
-    fn on_connect(&mut self, cmd: &Command) -> Vec<Reply> {
+    fn on_connect(&mut self, cmd: &Command) -> CommandOutcome {
         if self.authenticated {
-            return vec![Reply::err(cmd.id, Error::bad_request())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
         }
-        // Insecure/anonymous mode for M1: assign a fresh client id, empty user.
+        let req: ConnectRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+        };
+
+        // Determine identity. Insecure mode skips auth; otherwise a token is
+        // required and verified.
+        let (user, info, expire_at) = if self.node.client_insecure() {
+            (String::new(), None, 0)
+        } else if !req.token.is_empty() {
+            match self.node.verifier().verify_connect_token(&req.token) {
+                Ok(ct) => (ct.user, ct.info, ct.expire_at),
+                // Expired connect token -> error reply (109).
+                Err(VerifyError::Expired) => {
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::token_expired(),
+                    )]);
+                }
+                // Any other token failure -> close (3002).
+                Err(VerifyError::Invalid) => {
+                    return CommandOutcome::disconnect(Disconnect::invalid_token());
+                }
+            }
+        } else {
+            // No token and not insecure: reject the connection.
+            return CommandOutcome::disconnect(Disconnect::invalid_token());
+        };
+
         self.id = Uuid::new_v4().to_string();
-        self.user = String::new();
+        self.user = user;
+        self.conn_info = info;
+        self.expire_at = expire_at;
         self.authenticated = true;
         self.node.hub().add(ClientHandle {
             id: self.id.clone(),
@@ -105,12 +151,20 @@ impl Client {
             proto: self.proto,
             tx: self.tx.clone(),
         });
+
+        let (expires, ttl) = if expire_at > 0 {
+            (true, (expire_at - now_unix()).max(0) as u32)
+        } else {
+            (false, 0)
+        };
         let result = ConnectResult {
             client: self.id.clone(),
             version: String::new(),
+            expires,
+            ttl,
             ..Default::default()
         };
-        vec![ok_reply(self.proto, cmd.id, &result)]
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
 
     fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -140,7 +194,7 @@ impl Client {
         let info = ClientInfo {
             user: self.user.clone(),
             client: self.id.clone(),
-            conn_info: None,
+            conn_info: self.conn_info.as_ref().map(|b| Raw::from_bytes(b.clone())),
             chan_info: None,
         };
         if let Err(_e) = self.node.broker().publish(&req.channel, data, Some(info)) {
@@ -160,6 +214,40 @@ impl Client {
         }
         vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})]
     }
+
+    fn on_refresh(&mut self, cmd: &Command) -> CommandOutcome {
+        let req: RefreshRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+        };
+        match self.node.verifier().verify_connect_token(&req.token) {
+            Ok(ct) => {
+                if !ct.user.is_empty() {
+                    self.user = ct.user;
+                }
+                self.conn_info = ct.info;
+                self.expire_at = ct.expire_at;
+                let (expires, ttl) = if ct.expire_at > 0 {
+                    (true, (ct.expire_at - now_unix()).max(0) as u32)
+                } else {
+                    (false, 0)
+                };
+                let result = RefreshResult {
+                    client: self.id.clone(),
+                    version: String::new(),
+                    expires,
+                    ttl,
+                };
+                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
+            }
+            // Expired refresh token -> ErrorExpired (110).
+            Err(VerifyError::Expired) => {
+                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::expired())])
+            }
+            // Invalid refresh token -> close (3002).
+            Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
+        }
+    }
 }
 
 /// Parse a typed request from optional params, decoding in the connection's
@@ -178,4 +266,12 @@ fn ok_reply<T: Serialize + WireType>(proto: ProtocolType, id: u32, value: &T) ->
         Ok(raw) => Reply::ok(id, raw),
         Err(_) => Reply::err(id, Error::internal()),
     }
+}
+
+fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

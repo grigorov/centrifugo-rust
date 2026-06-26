@@ -7,7 +7,8 @@
 
 use crate::messages::{
     ClientInfo, ConnectRequest, ConnectResult, Publication, PublishRequest, PublishResult,
-    SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{pb, Command, Error, Push, Reply};
@@ -234,6 +235,40 @@ impl From<pb::SubscribeResult> for SubscribeResult {
             publications: r.publications.into_iter().map(Into::into).collect(),
             recovered: r.recovered,
             offset: r.offset,
+        }
+    }
+}
+
+// ---- Refresh ----
+
+impl From<pb::RefreshRequest> for RefreshRequest {
+    fn from(r: pb::RefreshRequest) -> Self {
+        RefreshRequest { token: r.token }
+    }
+}
+impl From<RefreshRequest> for pb::RefreshRequest {
+    fn from(r: RefreshRequest) -> Self {
+        pb::RefreshRequest { token: r.token }
+    }
+}
+
+impl From<RefreshResult> for pb::RefreshResult {
+    fn from(r: RefreshResult) -> Self {
+        pb::RefreshResult {
+            client: r.client,
+            version: r.version,
+            expires: r.expires,
+            ttl: r.ttl,
+        }
+    }
+}
+impl From<pb::RefreshResult> for RefreshResult {
+    fn from(r: pb::RefreshResult) -> Self {
+        RefreshResult {
+            client: r.client,
+            version: r.version,
+            expires: r.expires,
+            ttl: r.ttl,
         }
     }
 }

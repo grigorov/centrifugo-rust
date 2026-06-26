@@ -25,6 +25,12 @@ impl Oracle {
     /// Start the Go oracle in insecure client mode. `None` if the binary is
     /// missing or never becomes healthy (logged, so the calling test can skip).
     pub async fn start() -> Option<Oracle> {
+        Oracle::start_with(&["--client_insecure"]).await
+    }
+
+    /// Start the Go oracle with explicit extra flags (besides `--health`,
+    /// `--port`, `--log_level error`). `None` if the binary is absent/unhealthy.
+    pub async fn start_with(extra_args: &[&str]) -> Option<Oracle> {
         let bin = oracle_bin();
         if !bin.exists() {
             eprintln!(
@@ -34,17 +40,16 @@ impl Oracle {
             return None;
         }
         let port = pick_port();
-        let child = Command::new(&bin)
-            .args([
-                "--client_insecure",
-                "--health",
-                "--port",
-                &port.to_string(),
-                "--log_level",
-                "error",
-            ])
-            .spawn()
-            .ok()?;
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "--health",
+            "--port",
+            &port.to_string(),
+            "--log_level",
+            "error",
+        ]);
+        cmd.args(extra_args);
+        let child = cmd.spawn().ok()?;
         let mut oracle = Oracle {
             child,
             port,

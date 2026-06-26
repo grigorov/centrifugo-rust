@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 centrifugo-protocol = { path = "../centrifugo-protocol" }
 centrifugo-core = { path = "../centrifugo-core" }
+centrifugo-auth = { path = "../centrifugo-auth" }
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

@@ -114,6 +114,26 @@ pub struct UnsubscribeResult {}
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PingResult {}
 
+// ---- Refresh ----
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RefreshRequest {
+    #[serde(default)]
+    pub token: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RefreshResult {
+    #[serde(default)]
+    pub client: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expires: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub ttl: u32,
+}
+
 // ---- Inner objects ----
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

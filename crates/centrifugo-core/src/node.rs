@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use centrifugo_auth::TokenVerifier;
 use centrifugo_protocol::codec::{self, ProtocolType};
 use centrifugo_protocol::messages::{ClientInfo, Publication};
 use centrifugo_protocol::{Push, PushType, Raw};
@@ -20,18 +21,31 @@ use crate::memory::MemoryBroker;
 pub struct Node {
     hub: Arc<Hub>,
     broker: Arc<dyn Broker>,
+    verifier: Arc<TokenVerifier>,
+    client_insecure: bool,
 }
 
 impl Node {
-    /// Build a single-node memory node. The broker's route callback performs
-    /// local fan-out against the hub.
-    pub fn new() -> Arc<Self> {
+    /// Build a single-node memory node with the given token verifier and
+    /// insecure flag.
+    pub fn new_with(verifier: Arc<TokenVerifier>, client_insecure: bool) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let hub_for_route = hub.clone();
         let broker: Arc<dyn Broker> = Arc::new(MemoryBroker::new(move |channel, data, info| {
             deliver_publication(&hub_for_route, &channel, &data, info);
         }));
-        Arc::new(Node { hub, broker })
+        Arc::new(Node {
+            hub,
+            broker,
+            verifier,
+            client_insecure,
+        })
+    }
+
+    /// Build an insecure single-node memory node (no token required). Used by
+    /// tests and the `--client-insecure` server mode.
+    pub fn new() -> Arc<Self> {
+        Self::new_with(Arc::new(TokenVerifier::default()), true)
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
@@ -40,6 +54,14 @@ impl Node {
 
     pub fn broker(&self) -> &Arc<dyn Broker> {
         &self.broker
+    }
+
+    pub fn verifier(&self) -> &TokenVerifier {
+        &self.verifier
+    }
+
+    pub fn client_insecure(&self) -> bool {
+        self.client_insecure
     }
 
     /// Create a per-connection client bound to this node, writing to `tx`.
