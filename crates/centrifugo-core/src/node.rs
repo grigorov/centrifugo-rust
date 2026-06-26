@@ -35,6 +35,10 @@ pub struct ChannelOptions {
     pub history_lifetime: u64,
     /// Whether (re)subscribe recovery is offered on channels.
     pub history_recover: bool,
+    /// Allow anonymous (empty-user) clients to subscribe.
+    pub anonymous: bool,
+    /// Server-side-only channel: clients may not subscribe directly.
+    pub server_side: bool,
 }
 
 impl ChannelOptions {
@@ -79,6 +83,11 @@ impl Namespaces {
             }
         }
         Some(&self.default)
+    }
+
+    /// Whether `channel` is a private (token-protected) channel.
+    pub fn is_private(&self, channel: &str) -> bool {
+        !self.private_prefix.is_empty() && channel.starts_with(&self.private_prefix)
     }
 }
 
@@ -198,6 +207,11 @@ impl Node {
     /// Channel options for `channel`, or `None` if it names an unknown namespace.
     pub fn channel_options(&self, channel: &str) -> Option<&ChannelOptions> {
         self.namespaces.channel_options(channel)
+    }
+
+    /// Whether `channel` is private (token-protected, `$`-prefixed).
+    pub fn is_private(&self, channel: &str) -> bool {
+        self.namespaces.is_private(channel)
     }
 
     pub fn use_seq_gen(&self) -> bool {

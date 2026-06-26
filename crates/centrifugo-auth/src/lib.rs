@@ -10,4 +10,4 @@ pub mod verifier;
 
 pub use claims::{ConnectTokenClaims, SubscribeTokenClaims};
 pub use error::VerifyError;
-pub use verifier::{ConnectToken, TokenVerifier};
+pub use verifier::{ConnectToken, SubscribeToken, TokenVerifier};

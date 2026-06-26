@@ -192,11 +192,46 @@ impl Client {
         if req.channel.is_empty() {
             return vec![Reply::err(cmd.id, Error::bad_request())];
         }
-        let (presence, join_leave, history_recover) = match self.node.channel_options(&req.channel)
-        {
-            Some(o) => (o.presence, o.join_leave, o.history_recover),
-            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
-        };
+        let (presence, join_leave, history_recover, anonymous, server_side) =
+            match self.node.channel_options(&req.channel) {
+                Some(o) => (
+                    o.presence,
+                    o.join_leave,
+                    o.history_recover,
+                    o.anonymous,
+                    o.server_side,
+                ),
+                None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+            };
+        // Server-side channels cannot be subscribed to directly by clients.
+        if server_side {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
+        }
+        // Anonymous (empty-user) clients need the channel's `anonymous` option,
+        // unless the server runs in insecure mode.
+        if !anonymous && self.user.is_empty() && !self.node.client_insecure() {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
+        }
+        // Private ($-prefixed) channels require a valid subscription token whose
+        // client + channel match this connection.
+        if self.node.is_private(&req.channel) {
+            if req.token.is_empty() {
+                return vec![Reply::err(cmd.id, Error::permission_denied())];
+            }
+            match self.node.verifier().verify_subscribe_token(&req.token) {
+                Ok(t) => {
+                    if t.client != self.id || t.channel != req.channel {
+                        return vec![Reply::err(cmd.id, Error::permission_denied())];
+                    }
+                }
+                Err(VerifyError::Expired) => {
+                    return vec![Reply::err(cmd.id, Error::token_expired())]
+                }
+                Err(VerifyError::Invalid) => {
+                    return vec![Reply::err(cmd.id, Error::permission_denied())]
+                }
+            }
+        }
         self.node.hub().subscribe(&self.id, &req.channel);
         let _ = self.node.broker().subscribe(&req.channel);
 

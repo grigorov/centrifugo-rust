@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 
-use crate::claims::ConnectTokenClaims;
+use crate::claims::{ConnectTokenClaims, SubscribeTokenClaims};
 use crate::error::VerifyError;
 
 /// The verified connection token result.
@@ -17,6 +17,17 @@ pub struct ConnectToken {
     pub channels: Vec<String>,
     /// Unix seconds; 0 means no expiry.
     pub expire_at: i64,
+}
+
+/// The verified subscription token result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscribeToken {
+    pub client: String,
+    pub channel: String,
+    pub info: Option<Vec<u8>>,
+    pub expire_at: i64,
+    /// `eto` — expire the token only (do not also expire the subscription).
+    pub expire_token_only: bool,
 }
 
 #[derive(Default)]
@@ -70,52 +81,80 @@ impl TokenVerifier {
         }
     }
 
-    /// Verify a connection token. Signature/parse/disabled-alg failures →
-    /// `Invalid`; failed exp/nbf checks → `Expired`.
-    pub fn verify_connect_token(&self, token: &str) -> Result<ConnectToken, VerifyError> {
+    /// Verify signature (key chosen by header alg) and deserialize claims of
+    /// type `T`. Parse/signature/disabled-alg failures → `Invalid`. exp/nbf are
+    /// NOT checked here (claim-type specific; done by callers).
+    fn verify_and_decode<T: serde::de::DeserializeOwned>(
+        &self,
+        token: &str,
+    ) -> Result<T, VerifyError> {
         let header = decode_header(token).map_err(|_| VerifyError::Invalid)?;
         let key = self.key_for(header.alg).ok_or(VerifyError::Invalid)?;
-
-        // Verify signature only; exp/nbf are checked manually below to match Go's
-        // exact ErrTokenExpired path (and to allow tokens without exp).
         let mut validation = Validation::new(header.alg);
         validation.validate_exp = false;
         validation.validate_nbf = false;
         validation.validate_aud = false;
         validation.required_spec_claims.clear();
+        Ok(decode::<T>(token, key, &validation)
+            .map_err(|_| VerifyError::Invalid)?
+            .claims)
+    }
 
-        let data = decode::<ConnectTokenClaims>(token, key, &validation)
-            .map_err(|_| VerifyError::Invalid)?;
-        let claims = data.claims;
-
-        let now = now_unix();
-        if let Some(exp) = claims.exp {
-            if now >= exp {
-                return Err(VerifyError::Expired);
-            }
-        }
-        if let Some(nbf) = claims.nbf {
-            if now < nbf {
-                return Err(VerifyError::Expired);
-            }
-        }
-
-        // b64info overrides info when present.
-        let info = match claims.b64info {
-            Some(ref b) if !b.is_empty() => Some(
-                base64::engine::general_purpose::STANDARD
-                    .decode(b)
-                    .map_err(|_| VerifyError::Invalid)?,
-            ),
-            _ => claims.info.map(|r| r.get().as_bytes().to_vec()),
-        };
-
+    /// Verify a connection token. Signature/parse/disabled-alg failures →
+    /// `Invalid`; failed exp/nbf checks → `Expired`.
+    pub fn verify_connect_token(&self, token: &str) -> Result<ConnectToken, VerifyError> {
+        let claims: ConnectTokenClaims = self.verify_and_decode(token)?;
+        check_expiry(claims.exp, claims.nbf)?;
         Ok(ConnectToken {
             user: claims.sub.unwrap_or_default(),
-            info,
+            info: resolve_info(claims.b64info, claims.info)?,
             channels: claims.channels.unwrap_or_default(),
             expire_at: claims.exp.unwrap_or(0),
         })
+    }
+
+    /// Verify a subscription token (for private/`$`-prefixed channels).
+    pub fn verify_subscribe_token(&self, token: &str) -> Result<SubscribeToken, VerifyError> {
+        let claims: SubscribeTokenClaims = self.verify_and_decode(token)?;
+        check_expiry(claims.exp, claims.nbf)?;
+        Ok(SubscribeToken {
+            client: claims.client.unwrap_or_default(),
+            channel: claims.channel.unwrap_or_default(),
+            info: resolve_info(claims.b64info, claims.info)?,
+            expire_at: claims.exp.unwrap_or(0),
+            expire_token_only: claims.expire_token_only,
+        })
+    }
+}
+
+/// exp/nbf validity (matches Go's ErrTokenExpired path; absent claims pass).
+fn check_expiry(exp: Option<i64>, nbf: Option<i64>) -> Result<(), VerifyError> {
+    let now = now_unix();
+    if let Some(exp) = exp {
+        if now >= exp {
+            return Err(VerifyError::Expired);
+        }
+    }
+    if let Some(nbf) = nbf {
+        if now < nbf {
+            return Err(VerifyError::Expired);
+        }
+    }
+    Ok(())
+}
+
+/// `b64info` (base64) overrides `info` (inline JSON) when present.
+fn resolve_info(
+    b64info: Option<String>,
+    info: Option<Box<serde_json::value::RawValue>>,
+) -> Result<Option<Vec<u8>>, VerifyError> {
+    match b64info {
+        Some(ref b) if !b.is_empty() => Ok(Some(
+            base64::engine::general_purpose::STANDARD
+                .decode(b)
+                .map_err(|_| VerifyError::Invalid)?,
+        )),
+        _ => Ok(info.map(|r| r.get().as_bytes().to_vec())),
     }
 }
 

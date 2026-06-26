@@ -236,6 +236,20 @@ impl WsJsonClient {
         self.next_json().await
     }
 
+    /// Subscribe to a (private) channel with a subscription token.
+    pub async fn subscribe_token(
+        &mut self,
+        id: u32,
+        channel: &str,
+        token: &str,
+    ) -> serde_json::Value {
+        self.send_raw(&format!(
+            r#"{{"id":{id},"method":1,"params":{{"channel":"{channel}","token":"{token}"}}}}"#
+        ))
+        .await;
+        self.next_json().await
+    }
+
     /// Subscribe with the recover flag + last seen offset/epoch.
     pub async fn subscribe_recover(
         &mut self,

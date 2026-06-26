@@ -49,6 +49,8 @@ impl Settings {
                     history_size: a.history_size,
                     history_lifetime: a.history_lifetime,
                     history_recover: a.history_recover,
+                    anonymous: false,
+                    server_side: false,
                 },
                 namespaces: HashMap::new(),
                 namespace_boundary: ":".into(),
@@ -99,6 +101,10 @@ struct ChannelOptionsCfg {
     history_lifetime: u64,
     #[serde(default)]
     history_recover: bool,
+    #[serde(default)]
+    anonymous: bool,
+    #[serde(default)]
+    server_side: bool,
 }
 
 impl From<ChannelOptionsCfg> for ChannelOptions {
@@ -110,6 +116,8 @@ impl From<ChannelOptionsCfg> for ChannelOptions {
             history_size: c.history_size,
             history_lifetime: c.history_lifetime,
             history_recover: c.history_recover,
+            anonymous: c.anonymous,
+            server_side: c.server_side,
         }
     }
 }
