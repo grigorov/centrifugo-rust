@@ -75,14 +75,18 @@ impl MemoryEngine {
         stream.expire_at = now_unix() + opts.history_lifetime as i64;
     }
 
-    /// Drop an expired stream so a fresh one (new epoch) is created on next use.
+    /// On history-lifetime expiry, drop only the buffered publications but keep
+    /// the stream's `offset` and `epoch` (matches centrifuge memstream `Clear()`:
+    /// the meta — top offset + epoch — persists, since `memory_history_meta_ttl`
+    /// defaults to 0 so streams are never removed). A caught-up client recovering
+    /// after the window therefore still gets `recovered=true` with its last
+    /// seq/gen, instead of a reset epoch/offset.
     fn evict_if_expired(hist: &mut HashMap<String, Stream>, channel: &str) {
-        if hist
-            .get(channel)
-            .map(|s| now_unix() > s.expire_at)
-            .unwrap_or(false)
-        {
-            hist.remove(channel);
+        if let Some(s) = hist.get_mut(channel) {
+            if now_unix() > s.expire_at {
+                s.pubs.clear();
+                s.expire_at = i64::MAX;
+            }
         }
     }
 }

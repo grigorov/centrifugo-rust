@@ -59,6 +59,45 @@ async fn recover_returns_missed_publications() {
 }
 
 #[tokio::test]
+async fn caught_up_client_recovers_after_history_lifetime_window() {
+    // Go: history_lifetime clears the publication list but the stream meta (top
+    // offset + epoch) persists (memory_history_meta_ttl defaults to 0). A
+    // caught-up client reconnecting after the window must still get
+    // recovered=true with no missed publications — NOT a reset epoch/offset.
+    let s = Server::start_with_config(
+        r#"{"client_insecure":true,"history_size":10,"history_lifetime":1,"history_recover":true}"#,
+    )
+    .await;
+    let mut p = WsJsonClient::connect(&s.ws_url()).await;
+    p.connect_command().await;
+    for i in 1..=3u32 {
+        p.publish(i, "r", &format!(r#"{{"n":{i}}}"#)).await;
+    }
+    // Learn the top position + epoch (caught-up client's last seen state).
+    let mut s1 = WsJsonClient::connect(&s.ws_url()).await;
+    s1.connect_command().await;
+    let sub = s1.subscribe(2, "r").await;
+    let epoch = sub["result"]["epoch"].as_str().unwrap().to_string();
+    let top_seq = sub["result"]["seq"].as_u64().unwrap_or(0);
+    assert_eq!(top_seq, 3, "top seq before window: {sub}");
+
+    // Let the history window elapse (lifetime=1s) so the publication list is cleared.
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+
+    // A caught-up client recovers from the top: meta persists -> recovered=true,
+    // no publications.
+    let mut s2 = WsJsonClient::connect(&s.ws_url()).await;
+    s2.connect_command().await;
+    let rec = s2.subscribe_recover(2, "r", top_seq, &epoch).await;
+    assert!(
+        rec["result"]["recovered"].as_bool().unwrap_or(false),
+        "caught-up client must recover after the window: {rec}"
+    );
+    let n = rec["result"]["publications"].as_array().map(|a| a.len()).unwrap_or(0);
+    assert_eq!(n, 0, "no missed publications expected: {rec}");
+}
+
+#[tokio::test]
 async fn recover_with_wrong_epoch_not_recovered() {
     let s = Server::start_with(HIST).await;
     let mut p = WsJsonClient::connect(&s.ws_url()).await;

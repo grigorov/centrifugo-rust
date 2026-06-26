@@ -111,8 +111,15 @@ impl Envelope {
     }
 }
 
-/// Atomic history append: HHINCRBY offset, set epoch if absent, RPUSH+LTRIM, set
-/// TTL. KEYS[1]=meta KEYS[2]=list; ARGV: 1=payload 2=size 3=candidate_epoch 4=ttl_ms.
+/// Atomic history append: HINCRBY offset, set epoch if absent, RPUSH+LTRIM, then
+/// expire ONLY the list with the history lifetime. KEYS[1]=meta KEYS[2]=list;
+/// ARGV: 1=payload 2=size 3=candidate_epoch 4=list_ttl_ms.
+///
+/// The meta hash (offset+epoch) is deliberately NOT expired with the list: Go
+/// expires the publication list on `history_lifetime` but keeps the meta (top
+/// offset + epoch) until the separate `redis_history_meta_ttl`, which defaults
+/// to 0 (never). Expiring the meta with the list would reset epoch/offset and
+/// make a caught-up client recover=false after an idle window.
 const HIST_ADD: &str = r#"
 local offset = redis.call('hincrby', KEYS[1], 'offset', 1)
 local epoch = redis.call('hget', KEYS[1], 'epoch')
@@ -124,7 +131,6 @@ redis.call('rpush', KEYS[2], ARGV[1])
 local size = tonumber(ARGV[2])
 redis.call('ltrim', KEYS[2], -size, -1)
 local ttl = tonumber(ARGV[4])
-redis.call('pexpire', KEYS[1], ttl)
 redis.call('pexpire', KEYS[2], ttl)
 return {offset, epoch}
 "#;
@@ -209,13 +215,16 @@ impl RedisEngine {
 
         let list: Vec<Vec<u8>> = conn.lrange(Self::list_key(channel), 0, -1).await?;
         let len = list.len() as u64;
+        // Each element's absolute offset is its distance from the tail (newest ==
+        // top_offset). `saturating_sub` guards the pathological case where the
+        // meta and list desynced (e.g. independent key eviction) and top_offset <
+        // len — better a clamped offset than an integer underflow panic.
         let pubs = list
             .into_iter()
             .enumerate()
             .map(|(i, raw)| {
                 let pd: PubData = serde_json::from_slice(&raw).unwrap_or_default();
-                // The newest element is at the tail with offset == top_offset.
-                let offset = top_offset - (len - 1 - i as u64);
+                let offset = top_offset.saturating_sub(len - 1 - i as u64);
                 pd.into_publication(offset)
             })
             .collect();
