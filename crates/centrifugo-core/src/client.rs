@@ -192,13 +192,14 @@ impl Client {
         if req.channel.is_empty() {
             return vec![Reply::err(cmd.id, Error::bad_request())];
         }
+        let (presence, join_leave, history_recover) = match self.node.channel_options(&req.channel)
+        {
+            Some(o) => (o.presence, o.join_leave, o.history_recover),
+            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+        };
         self.node.hub().subscribe(&self.id, &req.channel);
         let _ = self.node.broker().subscribe(&req.channel);
 
-        let (presence, join_leave) = {
-            let o = self.node.opts();
-            (o.presence, o.join_leave)
-        };
         if presence {
             self.node
                 .add_presence(&req.channel, &self.id, self.client_info());
@@ -209,7 +210,7 @@ impl Client {
 
         // Recovery (when the channel offers it via history_recover).
         let mut result = SubscribeResult::default();
-        if self.node.opts().history_recover {
+        if history_recover {
             result.recoverable = true;
             let use_seq_gen = self.node.use_seq_gen();
             if req.recover {
@@ -262,7 +263,11 @@ impl Client {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
-        if !self.node.opts().history_enabled() {
+        let history_enabled = match self.node.channel_options(&req.channel) {
+            Some(o) => o.history_enabled(),
+            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+        };
+        if !history_enabled {
             return vec![Reply::err(cmd.id, Error::not_available())];
         }
         if !self.is_subscribed(&req.channel) {
@@ -310,9 +315,9 @@ impl Client {
     fn unsubscribe_channel(&mut self, channel: &str) {
         self.node.hub().unsubscribe(&self.id, channel);
         let _ = self.node.broker().unsubscribe(channel);
-        let (presence, join_leave) = {
-            let o = self.node.opts();
-            (o.presence, o.join_leave)
+        let (presence, join_leave) = match self.node.channel_options(channel) {
+            Some(o) => (o.presence, o.join_leave),
+            None => (false, false),
         };
         if presence {
             self.node.remove_presence(channel, &self.id);
@@ -328,9 +333,9 @@ impl Client {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
-        let (presence, disable_for_client) = {
-            let o = self.node.opts();
-            (o.presence, o.presence_disable_for_client)
+        let (presence, disable_for_client) = match self.node.channel_options(&req.channel) {
+            Some(o) => (o.presence, o.presence_disable_for_client),
+            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
         };
         if !presence || disable_for_client {
             return vec![Reply::err(cmd.id, Error::not_available())];
@@ -349,9 +354,9 @@ impl Client {
             Ok(r) => r,
             Err(e) => return vec![Reply::err(cmd.id, e)],
         };
-        let (presence, disable_for_client) = {
-            let o = self.node.opts();
-            (o.presence, o.presence_disable_for_client)
+        let (presence, disable_for_client) = match self.node.channel_options(&req.channel) {
+            Some(o) => (o.presence, o.presence_disable_for_client),
+            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
         };
         if !presence || disable_for_client {
             return vec![Reply::err(cmd.id, Error::not_available())];
@@ -371,11 +376,11 @@ impl Client {
     /// subscribed channels, then unregister from the hub.
     pub fn on_disconnect(&mut self) {
         let channels = std::mem::take(&mut self.subscriptions);
-        let (presence, join_leave) = {
-            let o = self.node.opts();
-            (o.presence, o.join_leave)
-        };
         for ch in &channels {
+            let (presence, join_leave) = match self.node.channel_options(ch) {
+                Some(o) => (o.presence, o.join_leave),
+                None => continue,
+            };
             if presence {
                 self.node.remove_presence(ch, &self.id);
             }

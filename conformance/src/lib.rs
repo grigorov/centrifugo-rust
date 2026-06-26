@@ -46,10 +46,22 @@ impl Server {
         Server::start_with(&["--client_insecure"]).await
     }
 
+    /// Spawn with a JSON config file (`-c`), the way namespaces are configured.
+    /// The same config can be passed to `Oracle::start_with_config` for goldens.
+    pub async fn start_with_config(config_json: &str) -> Server {
+        let port = pick_port();
+        let cfg_path = std::env::temp_dir().join(format!("centrifugo-rust-{port}.json"));
+        std::fs::write(&cfg_path, config_json).expect("write rust config");
+        Server::start_spawn(port, &["-c", cfg_path.to_str().unwrap()]).await
+    }
+
     /// Spawn with explicit extra `serve` args (e.g. `--token_hmac_secret_key secret`).
     pub async fn start_with(extra_args: &[&str]) -> Server {
+        Server::start_spawn(pick_port(), extra_args).await
+    }
+
+    async fn start_spawn(port: u16, extra_args: &[&str]) -> Server {
         ensure_binary_built();
-        let port = pick_port();
         let mut cmd = Command::new(bin_path());
         cmd.args(["serve", "--port", &port.to_string()]);
         cmd.args(extra_args);

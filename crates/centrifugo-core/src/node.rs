@@ -44,6 +44,44 @@ impl ChannelOptions {
     }
 }
 
+/// Namespace registry: default (top-level) options plus named namespaces.
+/// A channel `ns:rest` (after stripping the private prefix) resolves to namespace
+/// `ns`; a channel without the boundary resolves to the default options.
+#[derive(Debug, Clone)]
+pub struct Namespaces {
+    pub default: ChannelOptions,
+    pub namespaces: HashMap<String, ChannelOptions>,
+    pub namespace_boundary: String,
+    pub private_prefix: String,
+}
+
+impl Default for Namespaces {
+    fn default() -> Self {
+        Namespaces {
+            default: ChannelOptions::default(),
+            namespaces: HashMap::new(),
+            namespace_boundary: ":".into(),
+            private_prefix: "$".into(),
+        }
+    }
+}
+
+impl Namespaces {
+    /// Resolve channel options for `channel`. `None` means the channel names a
+    /// namespace that does not exist (→ UnknownChannel).
+    pub fn channel_options(&self, channel: &str) -> Option<&ChannelOptions> {
+        let trimmed = channel
+            .strip_prefix(&self.private_prefix)
+            .unwrap_or(channel);
+        if !self.namespace_boundary.is_empty() {
+            if let Some((ns, _)) = trimmed.split_once(&self.namespace_boundary) {
+                return self.namespaces.get(ns);
+            }
+        }
+        Some(&self.default)
+    }
+}
+
 /// Current top of a channel's history stream.
 #[derive(Debug, Clone, Default)]
 pub struct StreamPosition {
@@ -95,7 +133,7 @@ pub struct Node {
     broker: Arc<dyn Broker>,
     verifier: Arc<TokenVerifier>,
     client_insecure: bool,
-    opts: ChannelOptions,
+    namespaces: Namespaces,
     /// In-memory presence: channel -> (clientID -> ClientInfo). The memory
     /// engine has no TTL (matches centrifuge MemoryEngine).
     presence: Mutex<HashMap<String, HashMap<String, ClientInfo>>>,
@@ -112,7 +150,7 @@ impl Node {
     pub fn new_with(
         verifier: Arc<TokenVerifier>,
         client_insecure: bool,
-        opts: ChannelOptions,
+        namespaces: Namespaces,
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let hub_for_route = hub.clone();
@@ -124,7 +162,7 @@ impl Node {
             broker,
             verifier,
             client_insecure,
-            opts,
+            namespaces,
             presence: Mutex::new(HashMap::new()),
             history: Mutex::new(HashMap::new()),
             use_seq_gen: true,
@@ -137,7 +175,7 @@ impl Node {
         Self::new_with(
             Arc::new(TokenVerifier::default()),
             true,
-            ChannelOptions::default(),
+            Namespaces::default(),
         )
     }
 
@@ -157,8 +195,9 @@ impl Node {
         self.client_insecure
     }
 
-    pub fn opts(&self) -> &ChannelOptions {
-        &self.opts
+    /// Channel options for `channel`, or `None` if it names an unknown namespace.
+    pub fn channel_options(&self, channel: &str) -> Option<&ChannelOptions> {
+        self.namespaces.channel_options(channel)
     }
 
     pub fn use_seq_gen(&self) -> bool {
@@ -221,16 +260,30 @@ impl Node {
     /// offset, then fan out the live publication (offset zeroed on the wire,
     /// matching Go hub.go).
     pub fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
-        if self.opts.history_enabled() {
-            self.add_to_history(channel, data, info.clone());
+        if let Some(opts) = self.namespaces.channel_options(channel) {
+            if opts.history_enabled() {
+                self.add_to_history(
+                    channel,
+                    data,
+                    info.clone(),
+                    opts.history_size,
+                    opts.history_lifetime,
+                );
+            }
         }
         let _ = self.broker.publish(channel, data, info);
     }
 
-    fn add_to_history(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
+    fn add_to_history(
+        &self,
+        channel: &str,
+        data: &[u8],
+        info: Option<ClientInfo>,
+        size: usize,
+        lifetime_secs: u64,
+    ) {
         let mut hist = self.history.lock();
-        let lifetime = self.opts.history_lifetime as i64;
-        let size = self.opts.history_size;
+        let lifetime = lifetime_secs as i64;
         let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
         stream.offset += 1;
         let publication = Publication {

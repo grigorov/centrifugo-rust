@@ -9,11 +9,11 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::TokenVerifier;
-use centrifugo_core::{ChannelOptions, Node};
+use centrifugo_core::Node;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
-use crate::config::Config;
+use crate::config::Settings;
 
 const VERSION: &str = "2.8.6";
 
@@ -40,44 +40,28 @@ async fn main() -> anyhow::Result<()> {
                         .unwrap_or_else(|_| "info".into()),
                 )
                 .init();
-            let cfg = Config {
-                address: args.address,
-                port: args.port,
-                client_insecure: args.client_insecure,
-                token_hmac_secret_key: args.token_hmac_secret_key,
-                token_rsa_public_key: args.token_rsa_public_key,
-                token_ecdsa_public_key: args.token_ecdsa_public_key,
-                presence: args.presence,
-                join_leave: args.join_leave,
-                presence_disable_for_client: args.presence_disable_for_client,
-                history_size: args.history_size,
-                history_lifetime: args.history_lifetime,
-                history_recover: args.history_recover,
-                api_key: args.api_key,
-                api_insecure: args.api_insecure,
+            let settings = match &args.config {
+                Some(path) => Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args)?,
+                None => Settings::from_args(&args),
             };
-            let rsa_pem = read_pem_opt(&cfg.token_rsa_public_key)?;
-            let ecdsa_pem = read_pem_opt(&cfg.token_ecdsa_public_key)?;
+            let rsa_pem = read_pem_opt(&settings.token_rsa_public_key)?;
+            let ecdsa_pem = read_pem_opt(&settings.token_ecdsa_public_key)?;
             let verifier = TokenVerifier::new(
-                &cfg.token_hmac_secret_key,
+                &settings.token_hmac_secret_key,
                 rsa_pem.as_deref(),
                 ecdsa_pem.as_deref(),
             )
             .map_err(|e| anyhow::anyhow!("invalid token public key: {e}"))?;
-            let opts = ChannelOptions {
-                presence: cfg.presence,
-                join_leave: cfg.join_leave,
-                presence_disable_for_client: cfg.presence_disable_for_client,
-                history_size: cfg.history_size,
-                history_lifetime: cfg.history_lifetime,
-                history_recover: cfg.history_recover,
-            };
-            let node = Node::new_with(Arc::new(verifier), cfg.client_insecure, opts);
-            let addr = cfg.socket_addr();
+            let addr = settings.socket_addr();
             let api_auth = api::ApiAuth {
-                key: cfg.api_key,
-                insecure: cfg.api_insecure,
+                key: settings.api_key.clone(),
+                insecure: settings.api_insecure,
             };
+            let node = Node::new_with(
+                Arc::new(verifier),
+                settings.client_insecure,
+                settings.namespaces,
+            );
             let app = http::router(Arc::clone(&node), api_auth);
             http::serve(addr, app).await
         }

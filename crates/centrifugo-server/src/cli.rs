@@ -20,6 +20,9 @@ pub enum Command {
 
 #[derive(clap::Args, Debug)]
 pub struct ServeArgs {
+    /// Path to a JSON config file (required to define namespaces).
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<String>,
     #[arg(long, default_value = "127.0.0.1")]
     pub address: String,
     #[arg(long, default_value_t = 8000)]
