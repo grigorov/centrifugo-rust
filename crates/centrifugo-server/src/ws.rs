@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{RawQuery, State};
 use axum::response::Response;
-use centrifugo_core::{Node, Out};
+use centrifugo_core::{Node, Out, Signal};
 use centrifugo_protocol::codec::{decode_commands, encode_replies, ProtocolType};
 use centrifugo_protocol::Disconnect;
 use futures_util::{SinkExt, StreamExt};
@@ -48,7 +48,10 @@ fn proto_from_query(query: Option<&str>) -> ProtocolType {
 async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Out>(WRITE_QUEUE);
+    // Reader-task control channel for server-side unsubscribe/disconnect.
+    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Signal>(16);
     let mut client = node.new_client(tx.clone(), proto);
+    client.set_ctrl(ctrl_tx);
 
     // Writer task: drain the queue (frames + close) and emit a 25s native ping.
     let writer = tokio::spawn(async move {
@@ -104,6 +107,22 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
                 if let Some(d) = client.check_expired() {
                     let _ = tx.send(Out::Close(d)).await;
                     break;
+                }
+                continue;
+            }
+            sig = ctrl_rx.recv() => {
+                match sig {
+                    Some(Signal::Unsubscribe(ch)) if ch.is_empty() => {
+                        for c in client.subscribed_channels() {
+                            client.server_unsubscribe(&c).await;
+                        }
+                    }
+                    Some(Signal::Unsubscribe(ch)) => client.server_unsubscribe(&ch).await,
+                    Some(Signal::Disconnect(d)) => {
+                        let _ = tx.send(Out::Close(d)).await;
+                        break;
+                    }
+                    None => {}
                 }
                 continue;
             }

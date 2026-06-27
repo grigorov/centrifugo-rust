@@ -19,8 +19,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
 use crate::client::Client;
-use crate::engine::{Engine, NodeMessage, PublishOptions, RouteFn};
-use crate::hub::{Hub, Out};
+use crate::engine::{ControlMessage, Engine, NodeMessage, PublishOptions, RouteFn};
+use crate::hub::{Hub, Out, Signal};
 use crate::memory::MemoryEngine;
 use crate::proxy::Proxies;
 
@@ -391,6 +391,67 @@ impl Node {
     pub fn remove(&self, id: &str) {
         self.hub.remove(id);
     }
+
+    // ---- server-side client management (API unsubscribe / disconnect) ----
+
+    /// Unsubscribe all of `user`'s connections from `channel` (empty channel = all
+    /// channels), cluster-wide. Each affected client gets an Unsubscribe push.
+    pub async fn unsubscribe_user(&self, user: &str, channel: &str) {
+        if let Err(e) = self
+            .engine
+            .publish_control(ControlMessage::Unsubscribe {
+                user: user.to_string(),
+                channel: channel.to_string(),
+            })
+            .await
+        {
+            tracing::warn!("unsubscribe_user({user}): {e}");
+        }
+    }
+
+    /// Disconnect all of `user`'s connections (cluster-wide) with `code`/`reason`.
+    pub async fn disconnect_user(&self, user: &str, code: u32, reason: &str) {
+        if let Err(e) = self
+            .engine
+            .publish_control(ControlMessage::Disconnect {
+                user: user.to_string(),
+                code,
+                reason: reason.to_string(),
+            })
+            .await
+        {
+            tracing::warn!("disconnect_user({user}): {e}");
+        }
+    }
+}
+
+/// Apply a cross-node control command to this node's local connections by
+/// signalling each affected connection's reader task.
+fn apply_control(hub: &Hub, cmd: ControlMessage) {
+    match cmd {
+        ControlMessage::Unsubscribe { user, channel } => {
+            for h in hub.user_clients(&user) {
+                if let Some(ctrl) = &h.ctrl {
+                    let _ = ctrl.try_send(Signal::Unsubscribe(channel.clone()));
+                }
+            }
+        }
+        ControlMessage::Disconnect {
+            user,
+            code,
+            reason,
+        } => {
+            for h in hub.user_clients(&user) {
+                if let Some(ctrl) = &h.ctrl {
+                    let _ = ctrl.try_send(Signal::Disconnect(Disconnect::new(
+                        code,
+                        reason.clone(),
+                        false,
+                    )));
+                }
+            }
+        }
+    }
 }
 
 /// Build the route callback that delivers engine [`NodeMessage`]s to this node's
@@ -413,6 +474,7 @@ fn route_message(hub: &Hub, msg: NodeMessage) {
         NodeMessage::Leave { channel, info } => {
             deliver_push(hub, &channel, PushType::Leave, &Leave { info })
         }
+        NodeMessage::Control(cmd) => apply_control(hub, cmd),
     }
 }
 

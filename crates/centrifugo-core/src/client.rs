@@ -14,13 +14,15 @@ use centrifugo_protocol::messages::{
     PublishResult, RefreshRequest, RefreshResult, RpcRequest, RpcResult, SubRefreshRequest,
     SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
-use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
+use centrifugo_protocol::{
+    Command, Disconnect, Error, MethodType, ProtocolType, Push, PushType, Raw, Reply,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
-use crate::hub::{ClientHandle, ClientId, Out};
+use crate::hub::{ClientHandle, ClientId, Out, Signal};
 use crate::node::Node;
 use crate::proxy::{
     ProxyConnectOutcome, ProxyConnectRequest, ProxyOutcome, ProxyRequest, RefreshProxy,
@@ -92,6 +94,9 @@ pub struct Client {
     pending_joins: Vec<(String, ClientInfo)>,
     node: Arc<Node>,
     tx: Sender<Out>,
+    /// Reader-task control channel registered in the hub (server-side
+    /// unsubscribe/disconnect); set by the transport via [`Client::set_ctrl`].
+    ctrl_tx: Option<Sender<Signal>>,
 }
 
 impl Client {
@@ -108,6 +113,7 @@ impl Client {
             pending_joins: Vec::new(),
             node,
             tx,
+            ctrl_tx: None,
         }
     }
 
@@ -124,6 +130,32 @@ impl Client {
     /// WebSocket keeps the default).
     pub fn set_transport(&mut self, transport: &'static str) {
         self.transport = transport;
+    }
+
+    /// Register the reader-task control channel (server-side unsubscribe/disconnect).
+    /// Must be called before CONNECT so the handle lands in the hub.
+    pub fn set_ctrl(&mut self, ctrl_tx: Sender<Signal>) {
+        self.ctrl_tx = Some(ctrl_tx);
+    }
+
+    /// Channels this connection is currently subscribed to.
+    pub fn subscribed_channels(&self) -> Vec<String> {
+        self.subscriptions.keys().cloned().collect()
+    }
+
+    /// Server-initiated unsubscribe: drop the subscription (Leave + presence
+    /// cleanup) and notify the client with an Unsubscribe push (PushType::Unsub).
+    pub async fn server_unsubscribe(&mut self, channel: &str) {
+        if !self.is_subscribed(channel) {
+            return;
+        }
+        self.unsubscribe_channel(channel).await;
+        if let Ok(body) = codec::encode_result(self.proto, &UnsubscribeResult {}) {
+            let push = Push::new(PushType::Unsub, channel, Some(body));
+            if let Ok(frame) = codec::encode_push_frame(self.proto, &push) {
+                let _ = self.tx.send(Out::Frame(frame)).await;
+            }
+        }
     }
 
     fn is_subscribed(&self, channel: &str) -> bool {
@@ -293,6 +325,7 @@ impl Client {
             user: self.user.clone(),
             proto: self.proto,
             tx: self.tx.clone(),
+            ctrl: self.ctrl_tx.clone(),
         });
 
         // Establish server-side subscriptions (JWT `channels`) and report them in

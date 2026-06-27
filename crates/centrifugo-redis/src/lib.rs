@@ -24,7 +24,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use centrifugo_core::engine::{Engine, NodeMessage, PublishOptions};
+use centrifugo_core::engine::{ControlMessage, Engine, NodeMessage, PublishOptions};
 use centrifugo_core::node::StreamPosition;
 use centrifugo_core::RouteFn;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
@@ -210,17 +210,27 @@ impl RedisEngine {
         let mut pubsub = client.get_async_pubsub().await?;
         let pattern = format!("{PREFIX}.pub.*");
         pubsub.psubscribe(&pattern).await?;
+        let control_key = format!("{PREFIX}.control");
+        pubsub.subscribe(&control_key).await?;
         let topic_prefix = format!("{PREFIX}.pub.");
         tokio::spawn(async move {
             let mut stream = pubsub.into_on_message();
             while let Some(msg) = stream.next().await {
                 let topic = msg.get_channel_name().to_string();
-                let Some(channel) = topic.strip_prefix(&topic_prefix) else {
-                    continue;
-                };
                 let payload: Vec<u8> = match msg.get_payload() {
                     Ok(p) => p,
                     Err(_) => continue,
+                };
+                // Cross-node control command (server-side unsubscribe/disconnect).
+                if topic == control_key {
+                    match serde_json::from_slice::<ControlMessage>(&payload) {
+                        Ok(cmd) => route(NodeMessage::Control(cmd)),
+                        Err(e) => tracing::warn!("redis control decode: {e}"),
+                    }
+                    continue;
+                }
+                let Some(channel) = topic.strip_prefix(&topic_prefix) else {
+                    continue;
                 };
                 match serde_json::from_slice::<Envelope>(&payload) {
                     Ok(env) => route(env.into_node_message(channel.to_string())),
@@ -326,6 +336,15 @@ impl Engine for RedisEngine {
             },
         };
         self.publish_envelope(channel, &env).await
+    }
+
+    async fn publish_control(&self, msg: ControlMessage) -> anyhow::Result<()> {
+        // Publish to the control channel; every node (including this one, via its
+        // own subscriber) applies it.
+        let payload = serde_json::to_vec(&msg)?;
+        let mut conn = self.mgr.clone();
+        let _: () = conn.publish(format!("{PREFIX}.control"), payload).await?;
+        Ok(())
     }
 
     async fn publish_join(&self, channel: &str, info: ClientInfo) -> anyhow::Result<()> {

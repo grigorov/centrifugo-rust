@@ -10,8 +10,8 @@ pub mod node;
 pub mod proxy;
 
 pub use client::{Client, CommandOutcome};
-pub use engine::{Engine, NodeMessage, PublishOptions, RouteFn};
-pub use hub::{ClientHandle, ClientId, Hub, Out};
+pub use engine::{ControlMessage, Engine, NodeMessage, PublishOptions, RouteFn};
+pub use hub::{ClientHandle, ClientId, Hub, Out, Signal};
 pub use memory::MemoryEngine;
 pub use node::{make_route, ChannelOptions, Namespaces, Node, StreamPosition};
 pub use proxy::{

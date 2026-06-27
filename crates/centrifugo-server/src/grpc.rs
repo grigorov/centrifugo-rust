@@ -113,23 +113,42 @@ impl Centrifugo for GrpcApi {
 
     async fn unsubscribe(
         &self,
-        _request: Request<pb::UnsubscribeRequest>,
+        request: Request<pb::UnsubscribeRequest>,
     ) -> Result<Response<pb::UnsubscribeResponse>, Status> {
-        // Server-initiated unsubscribe is deferred (needs cross-node client
-        // targeting); ack as a no-op for surface parity.
+        let req = request.into_inner();
+        let error = if req.user.is_empty() {
+            Some(api_err(107, "bad request"))
+        } else if !req.channel.is_empty() {
+            channel_caps(&self.node, &req.channel).err()
+        } else {
+            None
+        };
+        if error.is_none() {
+            self.node.unsubscribe_user(&req.user, &req.channel).await;
+        }
         Ok(Response::new(pb::UnsubscribeResponse {
-            error: None,
+            error,
             result: None,
         }))
     }
 
     async fn disconnect(
         &self,
-        _request: Request<pb::DisconnectRequest>,
+        request: Request<pb::DisconnectRequest>,
     ) -> Result<Response<pb::DisconnectResponse>, Status> {
-        // Server-initiated disconnect is deferred; ack as a no-op.
+        let req = request.into_inner();
+        let error = if req.user.is_empty() {
+            Some(api_err(107, "bad request"))
+        } else {
+            None
+        };
+        if error.is_none() {
+            self.node
+                .disconnect_user(&req.user, 3012, "force disconnect")
+                .await;
+        }
         Ok(Response::new(pb::DisconnectResponse {
-            error: None,
+            error,
             result: None,
         }))
     }

@@ -14,8 +14,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
+use serde::{Deserialize, Serialize};
 
 use crate::node::StreamPosition;
+
+/// A cross-node control command, broadcast to every node so a user's connections
+/// are acted on cluster-wide (server-side unsubscribe / disconnect).
+#[derive(Clone, Serialize, Deserialize)]
+pub enum ControlMessage {
+    /// Unsubscribe `user`'s connections from `channel` (empty `channel` = all).
+    Unsubscribe { user: String, channel: String },
+    /// Disconnect all of `user`'s connections with this code/reason.
+    Disconnect {
+        user: String,
+        code: u32,
+        reason: String,
+    },
+}
 
 /// Per-publish history directives. `0/0` means history is disabled for the
 /// channel (no append).
@@ -47,6 +62,8 @@ pub enum NodeMessage {
         channel: String,
         info: ClientInfo,
     },
+    /// A cross-node control command to apply to local connections.
+    Control(ControlMessage),
 }
 
 /// Installed by the `Node`; an engine calls it to deliver a [`NodeMessage`] to
@@ -67,6 +84,11 @@ pub trait Engine: Send + Sync {
         info: Option<ClientInfo>,
         opts: PublishOptions,
     ) -> anyhow::Result<()>;
+
+    /// Broadcast a control command to all nodes (server-side unsubscribe /
+    /// disconnect). The memory engine applies it locally; the Redis engine
+    /// publishes it on the control channel (and applies it via its own subscriber).
+    async fn publish_control(&self, msg: ControlMessage) -> anyhow::Result<()>;
 
     /// Fan out a Join push (presence join), across all nodes.
     async fn publish_join(&self, channel: &str, info: ClientInfo) -> anyhow::Result<()>;

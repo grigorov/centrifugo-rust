@@ -22,14 +22,28 @@ pub enum Out {
     Close(Disconnect),
 }
 
+/// A server-initiated control signal delivered to a connection's *reader* task
+/// (which owns the per-connection state), as opposed to [`Out`] which feeds the
+/// writer. Used by the server API's unsubscribe/disconnect.
+#[derive(Debug, Clone)]
+pub enum Signal {
+    /// Unsubscribe the connection from `channel` (empty = all channels).
+    Unsubscribe(String),
+    /// Close the connection with this disconnect.
+    Disconnect(Disconnect),
+}
+
 /// A cheap, clonable handle to a connection's writer queue. `proto` selects which
-/// pre-encoded push frame (JSON or protobuf) the broadcaster delivers.
+/// pre-encoded push frame (JSON or protobuf) the broadcaster delivers. `ctrl`
+/// signals the reader task (server-side unsubscribe/disconnect); `None` for
+/// connections that don't accept control (e.g. in unit tests).
 #[derive(Clone)]
 pub struct ClientHandle {
     pub id: ClientId,
     pub user: String,
     pub proto: ProtocolType,
     pub tx: Sender<Out>,
+    pub ctrl: Option<Sender<Signal>>,
 }
 
 const SHARDS: usize = 16;
@@ -109,6 +123,16 @@ impl Hub {
         self.conns.read().get(id).cloned()
     }
 
+    /// Snapshot the handles of every connection belonging to `user`.
+    pub fn user_clients(&self, user: &str) -> Vec<ClientHandle> {
+        let users = self.users.read();
+        let Some(ids) = users.get(user) else {
+            return Vec::new();
+        };
+        let conns = self.conns.read();
+        ids.iter().filter_map(|id| conns.get(id).cloned()).collect()
+    }
+
     pub fn subscribe(&self, id: &str, channel: &str) {
         let mut s = self.shard_for(channel).write();
         s.subs
@@ -173,6 +197,7 @@ mod tests {
                 user: user.into(),
                 proto: ProtocolType::Json,
                 tx,
+                ctrl: None,
             },
             rx,
         )

@@ -23,7 +23,7 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
-use centrifugo_core::{Node, Out};
+use centrifugo_core::{Node, Out, Signal};
 use centrifugo_protocol::codec::{decode_commands, encode_replies, ProtocolType};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -153,8 +153,10 @@ fn create_session(node: &Arc<Node>, sessions: &Sessions, session_id: &str) {
 /// to the same channel by the Node's fan-out.
 async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_tx: mpsc::Sender<Out>) {
     let reply_tx = out_tx.clone();
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Signal>(16);
     let mut client = node.new_client(out_tx, ProtocolType::Json);
     client.set_transport("sockjs");
+    client.set_ctrl(ctrl_tx);
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
     loop {
@@ -168,6 +170,22 @@ async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_
                 if let Some(d) = client.check_expired() {
                     let _ = reply_tx.send(Out::Close(d)).await;
                     break;
+                }
+                continue;
+            }
+            sig = ctrl_rx.recv() => {
+                match sig {
+                    Some(Signal::Unsubscribe(ch)) if ch.is_empty() => {
+                        for c in client.subscribed_channels() {
+                            client.server_unsubscribe(&c).await;
+                        }
+                    }
+                    Some(Signal::Unsubscribe(ch)) => client.server_unsubscribe(&ch).await,
+                    Some(Signal::Disconnect(d)) => {
+                        let _ = reply_tx.send(Out::Close(d)).await;
+                        break;
+                    }
+                    None => {}
                 }
                 continue;
             }

@@ -87,6 +87,20 @@ struct ChannelReq {
     channel: String,
 }
 
+#[derive(Deserialize, Default)]
+struct UnsubscribeReq {
+    #[serde(default)]
+    user: String,
+    #[serde(default)]
+    channel: String,
+}
+
+#[derive(Deserialize, Default)]
+struct DisconnectReq {
+    #[serde(default)]
+    user: String,
+}
+
 #[derive(Serialize)]
 struct PresenceResult {
     presence: HashMap<String, ClientInfo>,
@@ -370,6 +384,30 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
             }
             void(id)
         }
+        "unsubscribe" => {
+            // Go Executor.Unsubscribe: user required (107); channel validated if
+            // non-empty (102); empty channel = unsubscribe from all channels.
+            let r: UnsubscribeReq = req!(UnsubscribeReq);
+            if r.user.is_empty() {
+                return err(id, 107, "bad request");
+            }
+            if !r.channel.is_empty() {
+                if let Err(e) = channel_caps(node, id, &r.channel) {
+                    return e;
+                }
+            }
+            node.unsubscribe_user(&r.user, &r.channel).await;
+            void(id)
+        }
+        "disconnect" => {
+            // Go Executor.Disconnect: user required (107); default DisconnectForceNoReconnect.
+            let r: DisconnectReq = req!(DisconnectReq);
+            if r.user.is_empty() {
+                return err(id, 107, "bad request");
+            }
+            node.disconnect_user(&r.user, 3012, "force disconnect").await;
+            void(id)
+        }
         "presence" => {
             let r: ChannelReq = req!(ChannelReq);
             match channel_caps(node, id, &r.channel) {
@@ -496,13 +534,25 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
             }
             reply(None, Vec::new())
         }
-        // Server-initiated unsubscribe/disconnect are deferred; ack as void.
         pb::MethodType::Unsubscribe => {
-            let _ = decode!(pb::UnsubscribeRequest);
+            let req = decode!(pb::UnsubscribeRequest);
+            if req.user.is_empty() {
+                return reply(Some(api_err(107, "bad request")), Vec::new());
+            }
+            if !req.channel.is_empty() {
+                if let Err(e) = pb_channel_caps(node, &req.channel) {
+                    return reply(Some(e), Vec::new());
+                }
+            }
+            node.unsubscribe_user(&req.user, &req.channel).await;
             reply(None, Vec::new())
         }
         pb::MethodType::Disconnect => {
-            let _ = decode!(pb::DisconnectRequest);
+            let req = decode!(pb::DisconnectRequest);
+            if req.user.is_empty() {
+                return reply(Some(api_err(107, "bad request")), Vec::new());
+            }
+            node.disconnect_user(&req.user, 3012, "force disconnect").await;
             reply(None, Vec::new())
         }
         pb::MethodType::Presence => {

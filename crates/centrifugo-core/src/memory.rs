@@ -117,6 +117,12 @@ impl Engine for MemoryEngine {
         Ok(())
     }
 
+    async fn publish_control(&self, msg: crate::engine::ControlMessage) -> anyhow::Result<()> {
+        // Single node: apply locally (no bus).
+        (self.route)(NodeMessage::Control(msg));
+        Ok(())
+    }
+
     async fn publish_join(&self, channel: &str, info: ClientInfo) -> anyhow::Result<()> {
         (self.route)(NodeMessage::Join {
             channel: channel.to_string(),
