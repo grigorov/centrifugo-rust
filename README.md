@@ -188,6 +188,51 @@ cargo test --workspace
 
 Тесты, требующие внешних зависимостей (Go-оракул, Redis, Go-SDK), **аккуратно пропускаются**, если зависимость недоступна, — набор остаётся «зелёным» на любой машине.
 
+### Что проверяет каждый файл тестов
+
+Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 195 тестов, 0 падений.**
+
+**Базовая проводная совместимость — M0–M12**
+
+| Файл | Что проверяет |
+|---|---|
+| `m0_smoke` | бинарь стартует и становится healthy |
+| `m1_golden`, `m1_vertical` | golden-дифф против Go-оракула; connect → subscribe → publish → receive по проводу |
+| `m2_disconnect`, `m2_protobuf` | коды disconnect до CONNECT; транспорт `?format=protobuf` end-to-end |
+| `m3_jwt` | JWT-аутентификация — HMAC (HS*), RSA (RS*), ECDSA (ES*), exp/nbf, golden connect-reply |
+| `m4_presence` | presence, presence_stats, join/leave (golden) |
+| `m5_history` | история + восстановление (seq/gen, порядок убывания; golden) |
+| `m6_api`, `m6_namespaces`, `m6_private` | HTTP API (apikey); разрешение namespace; приватные `$`-каналы (sub-токен) |
+| `m7_grpc` | gRPC server API (apikey в metadata) |
+| `m8_redis`, `m8_slow_consumer` | Redis мультиузловой (cross-node publish/presence/history); медленный потребитель → DisconnectSlow 3008 |
+| `m9_sockjs` | SockJS-fallback (xhr-polling + `/info` + CORS) |
+| `m10_jwks`, `m10_proxy` | JWKS-ключ по `kid`; connect-proxy |
+| `m11_admin`, `m11_cli`, `m11_env`, `m11_metrics` | admin auth + insecure; CLI-подкоманды; env `CENTRIFUGO_*`; Prometheus `/metrics` |
+| `m12_live_sdk` | настоящий SDK **centrifuge-go v0.6.2** управляет Rust-бинарём (решающее доказательство) |
+
+**Фазы полного Go-паритета — m13–m21**
+
+| Файл | Что проверяет |
+|---|---|
+| `m13_user_channels` | user-limited (`#`) каналы |
+| `m14_sub_refresh` | SUB_REFRESH (метод 11) |
+| `m15_server_side` | server-side каналы (JWT `channels` → авто-подписка + `subs`) |
+| `m16_presence_ttl` | TTL presence в Redis + таймер обновления на соединение |
+| `m17_proxies` | прокси refresh / subscribe / publish / rpc |
+| `m18_protobuf_api` | Protobuf HTTP API (`application/octet-stream`) |
+| `m19_publish_permission` | разрешение клиентской публикации (`publish` / `subscribe_to_publish`) |
+| `m20_redis_sentinel` | обнаружение мастера через Redis Sentinel |
+| `m21_admin_ui` | admin web UI + `admin_web_path` |
+
+**Исправления аудита, пост-аудит фичи и interop Go⇄Rust — m22–m25**
+
+| Файл | Что проверяет |
+|---|---|
+| `m22_subscribe_validation` | валидация SUBSCRIBE/UNSUBSCRIBE/SUB_REFRESH (паритет 105/3003/107) |
+| `m23_server_api` | серверные `unsubscribe` / `disconnect` через API (по всему кластеру) |
+| `m24_personal` | персональные каналы (`user_subscribe_to_personal`) |
+| `m25_go_rust_cluster` | **Go ⇄ Rust на одном Redis** — pub/sub, история, presence, control (unsubscribe/disconnect) и node-info, в обе стороны |
+
 ---
 
 ## Заметки о совместимости
@@ -208,4 +253,10 @@ cargo test --workspace
 
 ## Статус
 
-Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **195 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.
+Разработка шла по этапам **M0–M25** (см. разбивку по файлам тестов выше):
+
+- **M0–M12** — базовая проводная совместимость (транспорты, команды, история/восстановление, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, метрики, CLI, доказательство живым SDK).
+- **m13–m21** — фазы полного Go-паритета (`#`-каналы, SUB_REFRESH, server-side каналы, TTL presence, гранулярные прокси, Protobuf HTTP API, разрешение публикации, Redis Sentinel, admin web UI).
+- **m22–m25** — исправления adversarial-аудита + пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам) и **полный interop Go⇄Rust на Redis** (pub/sub + история + presence + control + node-info).
+
+Всё завершено: **195 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go; сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.

@@ -188,6 +188,51 @@ cargo test --workspace
 
 Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly** when the dependency is absent, so the suite stays green on any machine.
 
+### What each test file covers
+
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **195 tests total, 0 failures.**
+
+**Core wire compatibility — M0–M12**
+
+| File | Covers |
+|---|---|
+| `m0_smoke` | binary starts and becomes healthy |
+| `m1_golden`, `m1_vertical` | golden diff vs the Go oracle; connect → subscribe → publish → receive over the wire |
+| `m2_disconnect`, `m2_protobuf` | pre-CONNECT disconnect codes; the `?format=protobuf` transport end-to-end |
+| `m3_jwt` | JWT auth — HMAC (HS*), RSA (RS*), ECDSA (ES*), exp/nbf, golden connect reply |
+| `m4_presence` | presence, presence_stats, join/leave (golden) |
+| `m5_history` | history + recovery (seq/gen, descending order; golden) |
+| `m6_api`, `m6_namespaces`, `m6_private` | HTTP API (apikey); namespace resolution; private `$`-channels (subscription token) |
+| `m7_grpc` | gRPC server API (apikey metadata) |
+| `m8_redis`, `m8_slow_consumer` | Redis multi-node (cross-node publish/presence/history); slow-consumer → DisconnectSlow 3008 |
+| `m9_sockjs` | SockJS fallback (xhr-polling + `/info` + CORS) |
+| `m10_jwks`, `m10_proxy` | JWKS key-by-`kid`; connect proxy |
+| `m11_admin`, `m11_cli`, `m11_env`, `m11_metrics` | admin auth + insecure; CLI subcommands; `CENTRIFUGO_*` env; Prometheus `/metrics` |
+| `m12_live_sdk` | the real **centrifuge-go v0.6.2** SDK drives the Rust binary (decisive proof) |
+
+**Full Go-parity phases — m13–m21**
+
+| File | Covers |
+|---|---|
+| `m13_user_channels` | user-limited (`#`) channels |
+| `m14_sub_refresh` | SUB_REFRESH (method 11) |
+| `m15_server_side` | server-side channels (JWT `channels` → auto-subscribe + `subs`) |
+| `m16_presence_ttl` | Redis presence TTL + per-connection refresh timer |
+| `m17_proxies` | refresh / subscribe / publish / rpc proxies |
+| `m18_protobuf_api` | Protobuf HTTP API (`application/octet-stream`) |
+| `m19_publish_permission` | client publish permission (`publish` / `subscribe_to_publish`) |
+| `m20_redis_sentinel` | Redis Sentinel master discovery |
+| `m21_admin_ui` | admin web UI + `admin_web_path` |
+
+**Audit fixes, post-audit features & Go⇄Rust interop — m22–m25**
+
+| File | Covers |
+|---|---|
+| `m22_subscribe_validation` | SUBSCRIBE/UNSUBSCRIBE/SUB_REFRESH validation (105/3003/107 parity) |
+| `m23_server_api` | server-side `unsubscribe` / `disconnect` API (cluster-wide) |
+| `m24_personal` | personal channels (`user_subscribe_to_personal`) |
+| `m25_go_rust_cluster` | **Go ⇄ Rust on one Redis** — pub/sub, history, presence, control (unsubscribe/disconnect), and node-info, both directions |
+
 ---
 
 ## Compatibility notes
@@ -208,4 +253,10 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ## Status
 
-All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **195 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.
+Development ran across stages **M0–M25** (see the test-file breakdown above):
+
+- **M0–M12** — core wire compatibility (transports, commands, history/recovery, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, metrics, CLI, live-SDK proof).
+- **m13–m21** — full Go-parity phases (`#`-channels, SUB_REFRESH, server-side channels, presence TTL, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI).
+- **m22–m25** — adversarial-audit fixes + post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics) and **full Go⇄Rust Redis interop** (pub/sub + history + presence + control + node-info).
+
+All complete: **195 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK; a full adversarial audit resolved 40+ divergences from the Go reference.
