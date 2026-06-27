@@ -31,11 +31,14 @@
 | JWKS | ✅ выбор ключа по `kid`, фоновое обновление |
 | Прокси (HTTP-callbacks) | ✅ connect, refresh, subscribe, publish, rpc |
 | Namespaces и приватные каналы (`$`) | ✅ |
-| HTTP API (`POST /api`) | ✅ apikey-аутентификация; JSON (NDJSON) **и** Protobuf (`application/octet-stream`) |
+| HTTP API (`POST /api`) | ✅ apikey-аутентификация; JSON (NDJSON) **и** Protobuf (`application/octet-stream`); эхо Content-Type запроса |
+| Серверные `unsubscribe` / `disconnect` | ✅ отписать пользователя от канала / закрыть его соединения (HTTP + gRPC, по всему кластеру) |
 | gRPC API (порт 10000) | ✅ те же 11 RPC, apikey в metadata |
-| Движки | ✅ Memory (один узел) **и** Redis (мультиузловой), вкл. failover через **Sentinel** |
+| Персональные каналы | ✅ `user_subscribe_to_personal` — авто-подписка на `#<user>` |
+| Движки | ✅ Memory (один узел) **и** Redis (мультиузловой), вкл. **Sentinel** с переобнаружением мастера при failover «на лету» |
+| Interop Go ⇄ Rust на Redis | ✅ живой pub/sub fan-out между Go- и Rust-узлами на одном Redis (wire-формат centrifuge) |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену + вендоренный web UI на `/` |
-| Метрики Prometheus (`/metrics`) | ✅ |
+| Метрики Prometheus (`/metrics`) | ✅ node-gauges + счётчики по командам/сообщениям/транспортам |
 | Конфигурация | ✅ флаги + JSON-файл (`-c`) + env (`CENTRIFUGO_*`) |
 | CLI-подкоманды | ✅ `serve`, `gentoken`, `genconfig`, `checkconfig`, `version` |
 
@@ -133,7 +136,7 @@ cargo test --workspace
 }
 ```
 
-Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_password`, `admin_secret`, `admin_web_path`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
+Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
 
 ### CLI-подкоманды
 
@@ -181,14 +184,11 @@ cargo test --workspace
 ## Что осталось за рамками (отложено)
 
 - **Redis Cluster / шардинг.** Поддерживается только одномастерный Redis (напрямую или через Sentinel) — без шардинга по consistent-hash на несколько Redis-шардов.
-- **Смешанный Go+Rust кластер на одном Redis.** Однородный кластер из одних Rust-узлов работает; совместимость с Go-узлами на том же Redis не тестировалась.
-- **Переобнаружение мастера Redis при failover «на лету».** Мастер Sentinel разрешается при старте; живое переобнаружение после failover во время работы пока не подключено.
-- **Живая статистика узлов в admin** через WebSocket-канал admin (логин + опрос `/admin/api` работают; поток статистики в реальном времени не подключён).
-- **Персональные каналы** (`user_subscribe_to_personal`) — авто-подписка.
-- **Произвольное дерево `admin_web_path`.** Override отдаёт ассеты стандартного бандла; произвольное дерево файлов по этому пути не обобщено (штатный бандл `centrifugal/web` — ровно встроенный набор).
+- **Полный interop Go⇄Rust на Redis.** Живой pub/sub fan-out между Go- и Rust-узлами работает (wire-формат centrifuge); история, presence и control-сообщения остаются Rust-нативными и с Go-узлами не interop-ятся.
+- **Интеграционный тест live-failover Sentinel.** Переобнаружение мастера «на лету» реализовано, но CI-тест с реальным падением мастера требует харнеса с репликой + промоушеном Sentinel (живой сценарий проверен вручную).
 
 ---
 
 ## Статус
 
-Все этапы M0–M12 плюс фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) завершены. **171 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. После сквозного аудита совместимости устранены 17 расхождений с эталоном на Go.
+Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **186 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.

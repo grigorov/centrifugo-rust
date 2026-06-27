@@ -31,11 +31,14 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | JWKS | ✅ key selection by `kid`, background refresh |
 | Proxies (HTTP callbacks) | ✅ connect, refresh, subscribe, publish, rpc |
 | Namespaces & private channels (`$`) | ✅ |
-| HTTP API (`POST /api`) | ✅ apikey auth; JSON (NDJSON) **and** Protobuf (`application/octet-stream`) |
+| HTTP API (`POST /api`) | ✅ apikey auth; JSON (NDJSON) **and** Protobuf (`application/octet-stream`); echoes request Content-Type |
+| Server API `unsubscribe` / `disconnect` | ✅ force a user off a channel / close a user's connections (HTTP + gRPC, cluster-wide) |
 | gRPC API (port 10000) | ✅ same 11 RPCs, apikey in metadata |
-| Engines | ✅ Memory (single node) **and** Redis (multi-node), incl. **Sentinel** failover |
+| Personal channels | ✅ `user_subscribe_to_personal` auto-subscribe to `#<user>` |
+| Engines | ✅ Memory (single node) **and** Redis (multi-node), incl. **Sentinel** with mid-flight failover re-resolution |
+| Go ⇄ Rust Redis interop | ✅ live pub/sub fan-out across Go + Rust nodes on one Redis (centrifuge wire format) |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ token auth + vendored web UI at `/` |
-| Prometheus metrics (`/metrics`) | ✅ |
+| Prometheus metrics (`/metrics`) | ✅ node gauges + per-command/per-message/per-transport counters |
 | Configuration | ✅ flags + JSON file (`-c`) + env (`CENTRIFUGO_*`) |
 | CLI subcommands | ✅ `serve`, `gentoken`, `genconfig`, `checkconfig`, `version` |
 
@@ -133,7 +136,7 @@ Example `config.json`:
 }
 ```
 
-Key options: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_password`, `admin_secret`, `admin_web_path`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), plus channel options: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
+Key options: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), plus channel options: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
 
 ### CLI subcommands
 
@@ -181,14 +184,11 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 ## Out of scope (deferred)
 
 - **Redis Cluster / sharding.** Only single-master Redis (directly or via Sentinel) is supported — no consistent-hash sharding across multiple Redis shards.
-- **Mixed Go+Rust cluster on one Redis.** A homogeneous all-Rust cluster works; interop with Go nodes on the same Redis is untested.
-- **Redis mid-flight failover re-resolution.** The Sentinel master is resolved at startup; live re-discovery after a failover during operation is not yet wired.
-- **Admin live node-stats** over the admin WebSocket channel (login + `/admin/api` polling work; the real-time stats stream is not wired).
-- **Personal channels** (`user_subscribe_to_personal`) auto-subscribe.
-- **`admin_web_path` arbitrary tree.** The override serves the standard bundle's assets; an arbitrary file tree under the path is not generalized (the stock `centrifugal/web` bundle is exactly the embedded set).
+- **Full Go⇄Rust Redis interop.** Live pub/sub fan-out across Go + Rust nodes works (centrifuge wire format); history, presence, and control messages remain Rust-native, so those don't cross-interop with Go nodes.
+- **A live Sentinel-failover integration test.** Mid-flight master re-resolution is implemented, but a CI test that actually fails a master over needs a replica + Sentinel-promotion harness (the live scenario is verified manually).
 
 ---
 
 ## Status
 
-All milestones M0–M12 plus the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI) are complete. **171 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full compatibility audit resolved 17 divergences from the Go reference.
+All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **186 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.

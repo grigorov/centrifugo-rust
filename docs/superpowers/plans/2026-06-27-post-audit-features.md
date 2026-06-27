@@ -10,6 +10,8 @@
 
 **Order (as directed):** A1 → A2 → B(#16, #19, #24) → C(personal channels, Sentinel failover, admin WS stats, full metrics) → D10.
 
+> **STATUS: COMPLETE** (suite 186 passed / 0 failed). A1 `ef72f76`, A2 `617e8ab`, B1 `ddba6a5`, B2 `52c23bb`, B3 `ce937ae`, C1 `a469abb`, C2 `c5d5862`, C3 `8dc2942` (admin had no WS — SPA polls /admin/api info; verified), C4 metrics, D10 `46e47fe` (live pub/sub interop; history/presence/control stay Rust-native). Remaining deferrals: D9 Redis Cluster/sharding (out of scope), full byte-compat Go interop for history/presence/control, a live Sentinel-failover integration test.
+
 ---
 
 ## A1 — Server-side `unsubscribe` / `disconnect` via API
