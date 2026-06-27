@@ -87,7 +87,21 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     });
 
     // Read loop.
-    'read: while let Some(Ok(msg)) = stream.next().await {
+    // Re-assert presence on an interval (so TTL'd Redis presence survives) while
+    // also reading client commands.
+    let mut presence = tokio::time::interval(node.presence_ping_interval());
+    presence.tick().await; // consume the immediate first tick
+    'read: loop {
+        let msg = tokio::select! {
+            maybe = stream.next() => match maybe {
+                Some(Ok(m)) => m,
+                _ => break,
+            },
+            _ = presence.tick() => {
+                client.refresh_presence().await;
+                continue;
+            }
+        };
         let frame: Vec<u8> = match msg {
             Message::Text(t) => t.into_bytes(),
             Message::Binary(b) => b,

@@ -555,6 +555,21 @@ impl Client {
         vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
+    /// Re-assert presence for every presence-enabled subscription. Driven by the
+    /// transport's presence-ping timer so Redis presence entries (which carry a
+    /// TTL) do not expire while the client stays connected.
+    pub async fn refresh_presence(&self) {
+        if !self.authenticated {
+            return;
+        }
+        let info = self.client_info();
+        for (channel, state) in &self.subscriptions {
+            if state.presence {
+                self.node.add_presence(channel, &self.id, info.clone()).await;
+            }
+        }
+    }
+
     /// Called when the connection closes: publish Leave + clear presence for all
     /// subscribed channels, then unregister from the hub.
     pub async fn on_disconnect(&mut self) {

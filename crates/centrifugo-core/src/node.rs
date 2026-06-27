@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use centrifugo_auth::TokenVerifier;
 use centrifugo_protocol::codec::{self, ProtocolType, WireType};
@@ -136,6 +136,12 @@ pub struct Node {
     /// Optional connect-proxy: when set, CONNECT is authenticated via this
     /// callback rather than a JWT.
     connect_proxy: Option<Arc<dyn ConnectProxy>>,
+    /// How often a connection re-asserts its presence (Go
+    /// `client_presence_ping_interval`).
+    presence_ping_interval: Duration,
+    /// Presence entry TTL passed to the engine (Go
+    /// `client_presence_expire_interval`); the memory engine ignores it.
+    presence_expire_ms: u64,
     /// Use seq/gen instead of offset on the wire (centrifugo v2.8.6 default:
     /// config `v3_use_offset=false`). Real SDKs of this era expect seq/gen.
     use_seq_gen: bool,
@@ -154,6 +160,8 @@ impl Node {
         client_anonymous: bool,
         namespaces: Namespaces,
         connect_proxy: Option<Arc<dyn ConnectProxy>>,
+        presence_ping_secs: u64,
+        presence_expire_secs: u64,
     ) -> Arc<Self> {
         Arc::new(Node {
             hub,
@@ -163,12 +171,14 @@ impl Node {
             client_anonymous,
             namespaces,
             connect_proxy,
+            presence_ping_interval: Duration::from_secs(presence_ping_secs),
+            presence_expire_ms: presence_expire_secs * 1000,
             use_seq_gen: true,
         })
     }
 
     /// Build a single-node memory node with the given verifier, insecure flag,
-    /// and namespaces.
+    /// and namespaces (Go default presence intervals).
     pub fn new_with(
         verifier: Arc<TokenVerifier>,
         client_insecure: bool,
@@ -176,7 +186,7 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
-        Self::new_with_engine(hub, engine, verifier, client_insecure, false, namespaces, None)
+        Self::new_with_engine(hub, engine, verifier, client_insecure, false, namespaces, None, 25, 60)
     }
 
     /// Build an insecure single-node memory node (no token, no presence). Used
@@ -228,10 +238,19 @@ impl Node {
         self.use_seq_gen
     }
 
+    /// How often a connection should re-assert its presence.
+    pub fn presence_ping_interval(&self) -> Duration {
+        self.presence_ping_interval
+    }
+
     // ---- presence ----
 
     pub async fn add_presence(&self, channel: &str, client_id: &str, info: ClientInfo) {
-        if let Err(e) = self.engine.add_presence(channel, client_id, info).await {
+        if let Err(e) = self
+            .engine
+            .add_presence(channel, client_id, info, self.presence_expire_ms)
+            .await
+        {
             tracing::warn!("add_presence({channel}): {e}");
         }
     }

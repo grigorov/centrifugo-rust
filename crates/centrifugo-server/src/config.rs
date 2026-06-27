@@ -16,6 +16,8 @@ pub struct Settings {
     pub port: u16,
     pub client_insecure: bool,
     pub client_anonymous: bool,
+    pub client_presence_ping_interval: u64,
+    pub client_presence_expire_interval: u64,
     pub token_hmac_secret_key: String,
     pub token_rsa_public_key: String,
     pub token_ecdsa_public_key: String,
@@ -99,6 +101,8 @@ impl Settings {
             port: a.port,
             client_insecure: a.client_insecure,
             client_anonymous: a.client_anonymous,
+            client_presence_ping_interval: a.client_presence_ping_interval,
+            client_presence_expire_interval: a.client_presence_expire_interval,
             token_hmac_secret_key: a.token_hmac_secret_key.clone(),
             token_rsa_public_key: a.token_rsa_public_key.clone(),
             token_ecdsa_public_key: a.token_ecdsa_public_key.clone(),
@@ -146,6 +150,8 @@ impl Settings {
             port: a.port,
             client_insecure: fc.client_insecure,
             client_anonymous: fc.client_anonymous,
+            client_presence_ping_interval: fc.client_presence_ping_interval,
+            client_presence_expire_interval: fc.client_presence_expire_interval,
             token_hmac_secret_key: fc.token_hmac_secret_key,
             token_rsa_public_key: fc.token_rsa_public_key,
             token_ecdsa_public_key: fc.token_ecdsa_public_key,
@@ -229,6 +235,12 @@ fn default_private_prefix() -> String {
 fn default_grpc_port() -> u16 {
     10000
 }
+fn default_presence_ping() -> u64 {
+    25
+}
+fn default_presence_expire() -> u64 {
+    60
+}
 fn default_engine() -> String {
     "memory".into()
 }
@@ -242,6 +254,10 @@ struct FileConfig {
     client_insecure: bool,
     #[serde(default)]
     client_anonymous: bool,
+    #[serde(default = "default_presence_ping")]
+    client_presence_ping_interval: u64,
+    #[serde(default = "default_presence_expire")]
+    client_presence_expire_interval: u64,
     #[serde(default)]
     token_hmac_secret_key: String,
     #[serde(default)]

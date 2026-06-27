@@ -208,6 +208,8 @@ async fn main() -> anyhow::Result<()> {
                 settings.client_anonymous,
                 settings.namespaces,
                 connect_proxy,
+                settings.client_presence_ping_interval,
+                settings.client_presence_expire_interval,
             );
             if let Some((grpc_addr, grpc_key)) = grpc {
                 let grpc_node = Arc::clone(&node);

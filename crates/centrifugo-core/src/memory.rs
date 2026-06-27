@@ -180,7 +180,10 @@ impl Engine for MemoryEngine {
         channel: &str,
         client_id: &str,
         info: ClientInfo,
+        _ttl_ms: u64,
     ) -> anyhow::Result<()> {
+        // Memory presence has no TTL (matches centrifuge MemoryEngine, which
+        // ignores the expire duration); entries persist until explicit removal.
         self.presence
             .lock()
             .entry(channel.to_string())
@@ -270,11 +273,11 @@ mod tests {
     async fn presence_add_read_stats() {
         let engine = MemoryEngine::new(Arc::new(|_| {}));
         engine
-            .add_presence("room", "c1", ClientInfo { user: "u1".into(), client: "c1".into(), ..Default::default() })
+            .add_presence("room", "c1", ClientInfo { user: "u1".into(), client: "c1".into(), ..Default::default() }, 0)
             .await
             .unwrap();
         engine
-            .add_presence("room", "c2", ClientInfo { user: "u1".into(), client: "c2".into(), ..Default::default() })
+            .add_presence("room", "c2", ClientInfo { user: "u1".into(), client: "c2".into(), ..Default::default() }, 0)
             .await
             .unwrap();
         assert_eq!(engine.presence("room").await.unwrap().len(), 2);

@@ -12,10 +12,11 @@
 //!   atomically by a Lua script (HINCRBY offset, RPUSH, LTRIM, PEXPIRE). Each
 //!   element's absolute offset is derived from its position relative to the top
 //!   offset, so payloads need not embed it (centrifuge's list approach).
-//! - **Presence:** hash `centrifugo.presence.{channel}` (clientID → ClientInfo).
-//!   Explicit add/remove (no TTL); a presence-refresh timer + zset expiry for
-//!   crashed-node cleanup is deferred (matches the current memory engine, which
-//!   the presence goldens already validate).
+//! - **Presence:** data hash `centrifugo.presence.data.{channel}` (clientID →
+//!   ClientInfo) + expiry zset `centrifugo.presence.exp.{channel}` (clientID →
+//!   expire-at ms). Add/read are atomic Lua: add HSET+ZADD+PEXPIRE, read prunes
+//!   entries whose score has passed (crashed-node cleanup) then returns the hash.
+//!   The per-connection presence timer re-asserts entries before they expire.
 //!
 //! The wire contract is unchanged — Redis is internal — so the single-node
 //! goldens already pin the client-facing bytes.
@@ -135,6 +136,27 @@ redis.call('pexpire', KEYS[2], ttl)
 return {offset, epoch}
 "#;
 
+/// Presence add: HSET data + ZADD exp + PEXPIRE both. KEYS[1]=data KEYS[2]=exp;
+/// ARGV: 1=clientID 2=info 3=expire_at_ms 4=ttl_ms.
+const PRESENCE_ADD: &str = r#"
+redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
+redis.call('zadd', KEYS[2], ARGV[3], ARGV[1])
+local ttl = tonumber(ARGV[4])
+redis.call('pexpire', KEYS[1], ttl)
+redis.call('pexpire', KEYS[2], ttl)
+"#;
+
+/// Presence read: prune entries whose exp score <= now, then return the data
+/// hash. KEYS[1]=exp zset KEYS[2]=data hash; ARGV[1]=now_ms.
+const PRESENCE_READ: &str = r#"
+local expired = redis.call('zrangebyscore', KEYS[1], 0, ARGV[1])
+for i=1,#expired do
+  redis.call('zrem', KEYS[1], expired[i])
+  redis.call('hdel', KEYS[2], expired[i])
+end
+return redis.call('hgetall', KEYS[2])
+"#;
+
 pub struct RedisEngine {
     mgr: ConnectionManager,
 }
@@ -185,8 +207,11 @@ impl RedisEngine {
     fn list_key(channel: &str) -> String {
         format!("{PREFIX}.hist.list.{channel}")
     }
-    fn presence_key(channel: &str) -> String {
-        format!("{PREFIX}.presence.{channel}")
+    fn presence_data_key(channel: &str) -> String {
+        format!("{PREFIX}.presence.data.{channel}")
+    }
+    fn presence_exp_key(channel: &str) -> String {
+        format!("{PREFIX}.presence.exp.{channel}")
     }
 
     async fn publish_envelope(&self, channel: &str, env: &Envelope) -> anyhow::Result<()> {
@@ -331,30 +356,55 @@ impl Engine for RedisEngine {
         channel: &str,
         client_id: &str,
         info: ClientInfo,
+        ttl_ms: u64,
     ) -> anyhow::Result<()> {
+        let ttl = if ttl_ms == 0 { 60_000 } else { ttl_ms };
         let payload = serde_json::to_vec(&WireInfo::from(info))?;
+        let expire_at = now_ms() + ttl;
         let mut conn = self.mgr.clone();
-        let _: () = conn.hset(Self::presence_key(channel), client_id, payload).await?;
+        let _: () = redis::Script::new(PRESENCE_ADD)
+            .key(Self::presence_data_key(channel))
+            .key(Self::presence_exp_key(channel))
+            .arg(client_id)
+            .arg(payload)
+            .arg(expire_at)
+            .arg(ttl)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(())
     }
 
     async fn remove_presence(&self, channel: &str, client_id: &str) -> anyhow::Result<()> {
         let mut conn = self.mgr.clone();
-        let _: () = conn.hdel(Self::presence_key(channel), client_id).await?;
+        let _: () = conn
+            .hdel(Self::presence_data_key(channel), client_id)
+            .await?;
+        let _: () = conn
+            .zrem(Self::presence_exp_key(channel), client_id)
+            .await?;
         Ok(())
     }
 
     async fn presence(&self, channel: &str) -> anyhow::Result<HashMap<String, ClientInfo>> {
         let mut conn = self.mgr.clone();
-        let raw: HashMap<String, Vec<u8>> = conn.hgetall(Self::presence_key(channel)).await?;
-        Ok(raw
-            .into_iter()
-            .filter_map(|(k, v)| {
-                serde_json::from_slice::<WireInfo>(&v)
-                    .ok()
-                    .map(|w| (k, w.into()))
-            })
-            .collect())
+        // Prune expired entries (by the exp zset) then read the survivors,
+        // atomically. Returns a flat [field, value, field, value, ...] array.
+        let flat: Vec<Vec<u8>> = redis::Script::new(PRESENCE_READ)
+            .key(Self::presence_exp_key(channel))
+            .key(Self::presence_data_key(channel))
+            .arg(now_ms())
+            .invoke_async(&mut conn)
+            .await?;
+        let mut out = HashMap::new();
+        let mut it = flat.into_iter();
+        while let (Some(k), Some(v)) = (it.next(), it.next()) {
+            if let (Ok(client), Ok(w)) =
+                (String::from_utf8(k), serde_json::from_slice::<WireInfo>(&v))
+            {
+                out.insert(client, w.into());
+            }
+        }
+        Ok(out)
     }
 
     async fn presence_stats(&self, channel: &str) -> anyhow::Result<(u32, u32)> {
@@ -364,6 +414,14 @@ impl Engine for RedisEngine {
             presence.values().map(|ci| ci.user.as_str()).collect();
         Ok((num_clients, users.len() as u32))
     }
+}
+
+/// Current unix time in milliseconds (presence expiry scores).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Opaque per-stream epoch token (stability + change-on-recreate matter).

@@ -86,6 +86,12 @@ pub struct ServeArgs {
     /// Disable client-side presence commands even when presence is enabled.
     #[arg(long = "presence_disable_for_client")]
     pub presence_disable_for_client: bool,
+    /// How often (seconds) a connection re-asserts its presence.
+    #[arg(long = "client_presence_ping_interval", default_value_t = 25)]
+    pub client_presence_ping_interval: u64,
+    /// Presence entry TTL in seconds (Redis engine; memory ignores it).
+    #[arg(long = "client_presence_expire_interval", default_value_t = 60)]
+    pub client_presence_expire_interval: u64,
     /// Max publications kept in channel history (0 disables history).
     #[arg(long = "history_size", default_value_t = 0)]
     pub history_size: usize,

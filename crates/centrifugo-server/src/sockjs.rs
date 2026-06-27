@@ -154,7 +154,19 @@ fn create_session(node: &Arc<Node>, sessions: &Sessions, session_id: &str) {
 async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_tx: mpsc::Sender<Out>) {
     let reply_tx = out_tx.clone();
     let mut client = node.new_client(out_tx, ProtocolType::Json);
-    while let Some(raw) = incoming.recv().await {
+    let mut presence = tokio::time::interval(node.presence_ping_interval());
+    presence.tick().await; // consume the immediate first tick
+    loop {
+        let raw = tokio::select! {
+            maybe = incoming.recv() => match maybe {
+                Some(r) => r,
+                None => break,
+            },
+            _ = presence.tick() => {
+                client.refresh_presence().await;
+                continue;
+            }
+        };
         let cmds = match decode_commands(ProtocolType::Json, raw.as_bytes()) {
             Ok(c) => c,
             Err(_) => {

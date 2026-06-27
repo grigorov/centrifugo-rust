@@ -91,11 +91,16 @@ pub trait Engine: Send + Sync {
     /// Drop a channel's history.
     async fn remove_history(&self, channel: &str) -> anyhow::Result<()>;
 
+    /// Record presence for `client_id` on `channel`. `ttl_ms` is the entry's
+    /// time-to-live (the memory engine ignores it, like centrifuge's
+    /// MemoryEngine; the Redis engine expires the entry after it, refreshed by
+    /// the per-connection presence timer).
     async fn add_presence(
         &self,
         channel: &str,
         client_id: &str,
         info: ClientInfo,
+        ttl_ms: u64,
     ) -> anyhow::Result<()>;
     async fn remove_presence(&self, channel: &str, client_id: &str) -> anyhow::Result<()>;
     async fn presence(&self, channel: &str) -> anyhow::Result<HashMap<String, ClientInfo>>;
