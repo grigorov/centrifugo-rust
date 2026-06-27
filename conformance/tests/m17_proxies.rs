@@ -184,7 +184,7 @@ async fn refresh_proxy_extends_and_expires() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "refresh error: {r}");
     assert_eq!(r["result"]["expires"], true, "refresh result: {r}");
@@ -195,7 +195,7 @@ async fn refresh_proxy_extends_and_expires() {
     let s2 = Server::start_with_config(&cfg).await;
     let mut c2 = WsJsonClient::connect(&s2.ws_url()).await;
     c2.connect_command().await;
-    c2.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
+    c2.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
     let (code, _) = c2.next_close().await;
     assert_eq!(code, 3005, "expired refresh proxy must disconnect 3005");
 }
@@ -209,7 +209,20 @@ async fn refresh_proxy_missing_result_disconnects_expired() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3005, "missing refresh result must disconnect 3005");
+}
+
+#[tokio::test]
+async fn refresh_empty_token_disconnects_even_with_proxy() {
+    // Go handleRefresh rejects an empty token (3003) before any handler/proxy.
+    let url = spawn(format!(r#"{{"result":{{"expire_at":{}}}}}"#, now() + 3600)).await;
+    let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{url}"}}"#);
+    let s = Server::start_with_config(&cfg).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
+    let (code, _) = c.next_close().await;
+    assert_eq!(code, 3003, "empty refresh token must disconnect 3003");
 }

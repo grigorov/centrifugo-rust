@@ -809,15 +809,16 @@ impl Client {
             Ok(r) => r,
             Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
-        // With a refresh proxy configured, refresh via the HTTP callback instead
-        // of a JWT.
-        if let Some(proxy) = self.node.proxies().refresh.clone() {
-            return self.refresh_via_proxy(cmd.id, proxy.as_ref()).await;
-        }
-        // Go (centrifuge handleRefresh): an empty refresh token is rejected with
-        // DisconnectBadRequest (3003) before any verification.
+        // Go handleRefresh: an empty refresh token is DisconnectBadRequest (3003)
+        // before any handler runs — including the refresh proxy.
         if req.token.is_empty() {
             return CommandOutcome::disconnect(Disconnect::bad_request());
+        }
+        // With a refresh proxy configured, refresh via the HTTP callback instead
+        // of a JWT (the proxy authenticates by client/user; the token is only the
+        // required non-empty trigger here).
+        if let Some(proxy) = self.node.proxies().refresh.clone() {
+            return self.refresh_via_proxy(cmd.id, proxy.as_ref()).await;
         }
         match self.node.verifier().verify_connect_token(&req.token) {
             Ok(ct) => {
