@@ -9,6 +9,8 @@
 //! Only the messages needed up to the current milestone are defined; the rest
 //! are added in their milestones.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::raw::Raw;
@@ -35,6 +37,9 @@ pub struct ConnectRequest {
     pub name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// Server-side subscription requests (proto field 3); rarely sent by clients.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub subs: HashMap<String, SubscribeRequest>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -49,6 +54,9 @@ pub struct ConnectResult {
     pub ttl: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Raw>,
+    /// Server-side subscriptions established at connect (proto field 6).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub subs: HashMap<String, SubscribeResult>,
 }
 
 // ---- Subscribe ----

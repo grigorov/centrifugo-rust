@@ -69,6 +69,9 @@ pub(crate) struct SubState {
     pub server_side: bool,
 }
 
+/// Resolved connect credentials: (user, conn_info, expire_at, server-side channels).
+type Creds = (String, Option<Vec<u8>>, i64, Vec<String>);
+
 pub struct Client {
     pub id: ClientId,
     pub user: String,
@@ -165,7 +168,8 @@ impl Client {
         //   2. Else, a configured connect-proxy authenticates.
         //   3. Else, anonymous/insecure yields an empty-user connection.
         //   4. Else, reject with DisconnectBadRequest (3003).
-        let creds: Option<(String, Option<Vec<u8>>, i64)> = if !req.token.is_empty() {
+        // creds = (user, info, expire_at, server-side channels from the token).
+        let creds: Option<Creds> = if !req.token.is_empty() {
             match self.node.verifier().verify_connect_token(&req.token) {
                 Ok(ct) => {
                     // Insecure mode keeps the token's user/info but forces no expiry.
@@ -174,7 +178,7 @@ impl Client {
                     } else {
                         ct.expire_at
                     };
-                    Some((ct.user, ct.info, expire_at))
+                    Some((ct.user, ct.info, expire_at, ct.channels))
                 }
                 // Expired connect token -> error reply (109).
                 Err(VerifyError::Expired) => {
@@ -199,7 +203,9 @@ impl Client {
                 data: None,
             };
             match proxy.connect(preq).await {
-                Ok(ProxyConnectOutcome::Credentials(r)) => Some((r.user, r.info, r.expire_at)),
+                Ok(ProxyConnectOutcome::Credentials(r)) => {
+                    Some((r.user, r.info, r.expire_at, Vec::new()))
+                }
                 // Explicit proxy error -> relay that code/message as an error reply.
                 Ok(ProxyConnectOutcome::Error { code, message }) => {
                     return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::new(code, message))]);
@@ -219,13 +225,22 @@ impl Client {
 
         // Anonymous/insecure fallback to an empty-user connection when no
         // identity was established; otherwise reject.
-        let (user, info, expire_at) = match creds {
+        let (user, info, expire_at, channels) = match creds {
             Some(c) => c,
             None if self.node.client_anonymous() || self.node.client_insecure() => {
-                (String::new(), None, 0)
+                (String::new(), None, 0, Vec::new())
             }
             None => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
+
+        // Pre-validate server-side channels (from the token) before registering:
+        // an unknown namespace fails the connect with UnknownChannel(102), matching
+        // Go OnClientConnecting.
+        for ch in &channels {
+            if self.node.channel_options(ch).is_none() {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())]);
+            }
+        }
 
         self.user = user;
         self.conn_info = info;
@@ -238,6 +253,14 @@ impl Client {
             tx: self.tx.clone(),
         });
 
+        // Establish server-side subscriptions (JWT `channels`) and report them in
+        // the connect reply's `subs` map.
+        let mut subs = std::collections::HashMap::new();
+        for ch in channels {
+            let sub = self.server_side_subscribe(&ch).await;
+            subs.insert(ch, sub);
+        }
+
         let (expires, ttl) = if expire_at > 0 {
             (true, (expire_at - now_unix()).max(0) as u32)
         } else {
@@ -248,9 +271,52 @@ impl Client {
             version: String::new(),
             expires,
             ttl,
+            subs,
             ..Default::default()
         };
         CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
+    }
+
+    /// Establish a server-side subscription (from the connect token's `channels`)
+    /// and build its SubscribeResult for the connect reply. Channel options are
+    /// known-present (pre-validated by the caller).
+    async fn server_side_subscribe(&mut self, channel: &str) -> SubscribeResult {
+        let (presence, join_leave, recoverable) = self
+            .node
+            .channel_options(channel)
+            .map(|o| (o.presence, o.join_leave, o.history_recover))
+            .unwrap_or((false, false, false));
+
+        self.node.hub().subscribe(&self.id, channel);
+        let _ = self.node.engine().subscribe(channel).await;
+        if presence {
+            self.node
+                .add_presence(channel, &self.id, self.client_info())
+                .await;
+        }
+        self.subscriptions.insert(
+            channel.to_string(),
+            SubState {
+                presence,
+                join_leave,
+                recoverable,
+                server_side: true,
+                ..Default::default()
+            },
+        );
+
+        // Report the current stream top so the client has a recovery baseline.
+        let mut result = SubscribeResult::default();
+        if recoverable {
+            result.recoverable = true;
+            let (_pubs, top) = self.node.history(channel).await;
+            result.epoch = top.epoch;
+            encode_position(&mut result, top.offset, self.node.use_seq_gen());
+        }
+        if join_leave {
+            self.node.publish_join(channel, self.client_info()).await;
+        }
+        result
     }
 
     async fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {

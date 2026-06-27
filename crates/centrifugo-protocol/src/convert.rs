@@ -145,6 +145,7 @@ impl From<pb::ConnectRequest> for ConnectRequest {
             data: vec_to_raw(r.data),
             name: r.name,
             version: r.version,
+            subs: r.subs.into_iter().map(|(k, v)| (k, v.into())).collect(),
         }
     }
 }
@@ -153,7 +154,7 @@ impl From<ConnectRequest> for pb::ConnectRequest {
         pb::ConnectRequest {
             token: r.token,
             data: raw_to_vec(r.data),
-            subs: Default::default(),
+            subs: r.subs.into_iter().map(|(k, v)| (k, v.into())).collect(),
             name: r.name,
             version: r.version,
         }
@@ -168,7 +169,7 @@ impl From<ConnectResult> for pb::ConnectResult {
             expires: r.expires,
             ttl: r.ttl,
             data: raw_to_vec(r.data),
-            subs: Default::default(),
+            subs: r.subs.into_iter().map(|(k, v)| (k, v.into())).collect(),
         }
     }
 }
@@ -180,6 +181,7 @@ impl From<pb::ConnectResult> for ConnectResult {
             expires: r.expires,
             ttl: r.ttl,
             data: vec_to_raw(r.data),
+            subs: r.subs.into_iter().map(|(k, v)| (k, v.into())).collect(),
         }
     }
 }
