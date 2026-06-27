@@ -24,8 +24,10 @@ async fn centrifuge_go_sdk_roundtrip_against_rust() {
 #[tokio::test]
 async fn centrifuge_go_sdk_authenticates_with_jwt() {
     // A token-mode server (no client_insecure): the SDK must authenticate with a
-    // JWT minted by our own `gentoken` for the round-trip to work.
-    let s = Server::start_with_config(r#"{"token_hmac_secret_key":"m12secret"}"#).await;
+    // JWT minted by our own `gentoken`. `publish` is enabled so the SDK's
+    // client-side publish is permitted (non-insecure requires the option).
+    let s =
+        Server::start_with_config(r#"{"token_hmac_secret_key":"m12secret","publish":true}"#).await;
     let (code, token) = run_cli(&["gentoken", "--token_hmac_secret_key", "m12secret", "-u", "sdk-user"]);
     assert_eq!(code, 0, "gentoken failed");
     let token = token.trim();

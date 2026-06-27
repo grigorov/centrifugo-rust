@@ -170,7 +170,37 @@ impl RedisEngine {
         } else {
             format!("redis://{addr}")
         };
-        let client = redis::Client::open(url)?;
+        Self::from_client(redis::Client::open(url)?, route).await
+    }
+
+    /// Connect via Redis Sentinel: resolve the current master for `master_name`
+    /// from the `sentinels` (comma-separated `host:port`), then connect to it.
+    /// (Mid-flight failover re-resolution is a refinement; the master is resolved
+    /// at startup here.)
+    pub async fn connect_sentinel(
+        master_name: &str,
+        sentinels: &str,
+        route: RouteFn,
+    ) -> anyhow::Result<Self> {
+        let addrs: Vec<String> = sentinels
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                if s.contains("://") {
+                    s.to_string()
+                } else {
+                    format!("redis://{s}")
+                }
+            })
+            .collect();
+        let mut sentinel = redis::sentinel::Sentinel::build(addrs)?;
+        let client = sentinel.async_master_for(master_name, None).await?;
+        Self::from_client(client, route).await
+    }
+
+    /// Common setup: a multiplexed command manager + a pub/sub subscriber task.
+    async fn from_client(client: redis::Client, route: RouteFn) -> anyhow::Result<Self> {
         let mgr = client.get_connection_manager().await?;
 
         let mut pubsub = client.get_async_pubsub().await?;

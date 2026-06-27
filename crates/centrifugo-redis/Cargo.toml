@@ -11,7 +11,7 @@ license.workspace = true
 centrifugo-core = { path = "../centrifugo-core" }
 centrifugo-protocol = { path = "../centrifugo-protocol" }
 async-trait = "0.1"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "sentinel"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

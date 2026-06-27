@@ -153,4 +153,11 @@ pub struct ServeArgs {
     /// Redis address (`host:port` or a full `redis://` URL) when `engine=redis`.
     #[arg(long = "redis_address", default_value = "127.0.0.1:6379")]
     pub redis_address: String,
+    /// Redis Sentinel master name; when set (with `redis_sentinels`), the master
+    /// is discovered via Sentinel instead of using `redis_address`.
+    #[arg(long = "redis_master_name", default_value = "")]
+    pub redis_master_name: String,
+    /// Comma-separated Redis Sentinel addresses (`host:port`).
+    #[arg(long = "redis_sentinels", default_value = "")]
+    pub redis_sentinels: String,
 }

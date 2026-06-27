@@ -30,7 +30,8 @@ fn sign_with(claims: serde_json::Value, secret: &str) -> String {
 
 #[tokio::test]
 async fn valid_hs256_connect_authenticates_and_user_propagates() {
-    let s = Server::start_with(&["--token_hmac_secret_key", SECRET]).await;
+    // `--publish` so the token-mode (non-insecure) client may publish.
+    let s = Server::start_with(&["--token_hmac_secret_key", SECRET, "--publish"]).await;
     let token = sign(serde_json::json!({"sub": "user42"}));
 
     // Subscriber connects with token.

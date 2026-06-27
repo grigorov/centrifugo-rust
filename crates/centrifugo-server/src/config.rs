@@ -29,6 +29,8 @@ pub struct Settings {
     pub grpc_api_key: String,
     pub engine: String,
     pub redis_address: String,
+    pub redis_master_name: String,
+    pub redis_sentinels: String,
     pub proxy_connect_endpoint: String,
     pub proxy_refresh_endpoint: String,
     pub proxy_subscribe_endpoint: String,
@@ -118,6 +120,8 @@ impl Settings {
             grpc_api_key: a.grpc_api_key.clone(),
             engine: a.engine.clone(),
             redis_address: a.redis_address.clone(),
+            redis_master_name: a.redis_master_name.clone(),
+            redis_sentinels: a.redis_sentinels.clone(),
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
             proxy_refresh_endpoint: a.proxy_refresh_endpoint.clone(),
             proxy_subscribe_endpoint: a.proxy_subscribe_endpoint.clone(),
@@ -175,6 +179,8 @@ impl Settings {
             grpc_api_key: fc.grpc_api_key,
             engine: fc.engine,
             redis_address: fc.redis_address,
+            redis_master_name: fc.redis_master_name,
+            redis_sentinels: fc.redis_sentinels,
             proxy_connect_endpoint: fc.proxy_connect_endpoint,
             proxy_refresh_endpoint: fc.proxy_refresh_endpoint,
             proxy_subscribe_endpoint: fc.proxy_subscribe_endpoint,
@@ -308,6 +314,10 @@ struct FileConfig {
     engine: String,
     #[serde(default = "default_redis_address")]
     redis_address: String,
+    #[serde(default)]
+    redis_master_name: String,
+    #[serde(default)]
+    redis_sentinels: String,
     #[serde(default)]
     proxy_connect_endpoint: String,
     #[serde(default)]

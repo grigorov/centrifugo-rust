@@ -106,6 +106,31 @@ impl Server {
         Server::start_spawn(port, &["-c", cfg_path.to_str().unwrap()]).await
     }
 
+    /// Spawn a node that reaches Redis via Sentinel (engine=redis +
+    /// redis_master_name + redis_sentinels injected into the config).
+    pub async fn start_redis_sentinel(
+        master_name: &str,
+        sentinels: &str,
+        config_json: &str,
+    ) -> Server {
+        let port = pick_port();
+        let mut cfg: serde_json::Value =
+            serde_json::from_str(config_json).unwrap_or_else(|_| serde_json::json!({}));
+        let obj = cfg.as_object_mut().expect("config must be a JSON object");
+        obj.insert("engine".into(), serde_json::Value::String("redis".into()));
+        obj.insert(
+            "redis_master_name".into(),
+            serde_json::Value::String(master_name.into()),
+        );
+        obj.insert(
+            "redis_sentinels".into(),
+            serde_json::Value::String(sentinels.into()),
+        );
+        let cfg_path = std::env::temp_dir().join(format!("centrifugo-rust-sentinel-{port}.json"));
+        std::fs::write(&cfg_path, cfg.to_string()).expect("write rust sentinel config");
+        Server::start_spawn(port, &["-c", cfg_path.to_str().unwrap()]).await
+    }
+
     async fn start_spawn(port: u16, extra_args: &[&str]) -> Server {
         Server::start_spawn_env(port, extra_args, &[]).await
     }
@@ -202,6 +227,100 @@ impl Drop for Redis {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// A throwaway Redis master + a `redis-sentinel` monitoring it, for the Sentinel
+/// integration test. Both killed on drop. `None` if either binary is absent.
+pub struct RedisSentinel {
+    master: Child,
+    sentinel: Child,
+    pub master_name: String,
+    pub sentinel_addr: String,
+}
+
+impl RedisSentinel {
+    pub async fn start() -> Option<RedisSentinel> {
+        let master_port = pick_port();
+        let sentinel_port = pick_port();
+        let master_name = "mymaster".to_string();
+
+        let master = Command::new("redis-server")
+            .args(["--port", &master_port.to_string(), "--save", "", "--appendonly", "no"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let master = match master {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("redis-server absent; skipping Sentinel test");
+                return None;
+            }
+        };
+        // Wait for the master.
+        let mut master = master;
+        let master_addr = format!("127.0.0.1:{master_port}");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(&master_addr).is_ok() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if !ready {
+            let _ = master.kill();
+            return None;
+        }
+
+        let conf = format!(
+            "port {sentinel_port}\nsentinel monitor {master_name} 127.0.0.1 {master_port} 1\nsentinel down-after-milliseconds {master_name} 5000\n"
+        );
+        let conf_path = std::env::temp_dir().join(format!("centrifugo-sentinel-{sentinel_port}.conf"));
+        if std::fs::write(&conf_path, conf).is_err() {
+            let _ = master.kill();
+            return None;
+        }
+        let sentinel = Command::new("redis-sentinel")
+            .arg(&conf_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let sentinel = match sentinel {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("redis-sentinel absent; skipping Sentinel test");
+                let _ = master.kill();
+                return None;
+            }
+        };
+        let sentinel_addr = format!("127.0.0.1:{sentinel_port}");
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(&sentinel_addr).is_ok() {
+                // Give Sentinel a moment to learn the master.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                return Some(RedisSentinel {
+                    master,
+                    sentinel,
+                    master_name,
+                    sentinel_addr,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let _ = master.kill();
+        let mut sentinel = sentinel;
+        let _ = sentinel.kill();
+        None
+    }
+}
+
+impl Drop for RedisSentinel {
+    fn drop(&mut self) {
+        let _ = self.sentinel.kill();
+        let _ = self.sentinel.wait();
+        let _ = self.master.kill();
+        let _ = self.master.wait();
     }
 }
 

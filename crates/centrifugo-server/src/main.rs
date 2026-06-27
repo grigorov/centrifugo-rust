@@ -179,12 +179,26 @@ async fn main() -> anyhow::Result<()> {
             let hub = Arc::new(Hub::new());
             let engine: Arc<dyn Engine> = match settings.engine.as_str() {
                 "redis" => {
-                    let e = RedisEngine::connect(&settings.redis_address, make_route(&hub))
+                    let e = if !settings.redis_master_name.is_empty() {
+                        tracing::info!(
+                            "using redis engine via sentinel (master {})",
+                            settings.redis_master_name
+                        );
+                        RedisEngine::connect_sentinel(
+                            &settings.redis_master_name,
+                            &settings.redis_sentinels,
+                            make_route(&hub),
+                        )
                         .await
-                        .map_err(|e| {
-                            anyhow::anyhow!("connect redis at {}: {e}", settings.redis_address)
-                        })?;
-                    tracing::info!("using redis engine at {}", settings.redis_address);
+                        .map_err(|e| anyhow::anyhow!("connect redis via sentinel: {e}"))?
+                    } else {
+                        tracing::info!("using redis engine at {}", settings.redis_address);
+                        RedisEngine::connect(&settings.redis_address, make_route(&hub))
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("connect redis at {}: {e}", settings.redis_address)
+                            })?
+                    };
                     Arc::new(e)
                 }
                 _ => Arc::new(MemoryEngine::new(make_route(&hub))),
