@@ -355,7 +355,8 @@ pub async fn serve(node: Arc<Node>, addr: SocketAddr, api_key: String) -> anyhow
         if ok {
             Ok(req)
         } else {
-            Err(Status::unauthenticated("unauthorized"))
+            // Match Go's grpc-message exactly (status code already Unauthenticated).
+            Err(Status::unauthenticated("unauthenticated"))
         }
     };
     let svc = CentrifugoServer::with_interceptor(GrpcApi::new(node), interceptor);

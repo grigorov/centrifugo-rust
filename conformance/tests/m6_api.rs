@@ -57,6 +57,32 @@ async fn bad_apikey_returns_401() {
 }
 
 #[tokio::test]
+async fn apikey_with_trailing_token_returns_401() {
+    // Go middleware/auth requires exactly `apikey <KEY>` (two fields); a trailing
+    // token is rejected even when the key itself is correct.
+    let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api", s.http))
+        .header("Authorization", format!("apikey {KEY} extra"))
+        .body(r#"{"method":"info","params":{}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 401, "trailing token must 401");
+}
+
+#[tokio::test]
+async fn rpc_api_method_error_codes() {
+    // Server API `rpc`: empty inner method → BadRequest(107); a non-empty but
+    // unregistered method → MethodNotFound(104). Mirrors the protobuf path + Go.
+    let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
+    let r = api_post(&s.http, KEY, r#"{"method":"rpc","params":{}}"#).await;
+    assert_eq!(r["error"]["code"], 107, "rpc empty method: {r}");
+    let r = api_post(&s.http, KEY, r#"{"method":"rpc","params":{"method":"x"}}"#).await;
+    assert_eq!(r["error"]["code"], 104, "rpc unknown method: {r}");
+}
+
+#[tokio::test]
 async fn channels_lists_subscribed() {
     let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;

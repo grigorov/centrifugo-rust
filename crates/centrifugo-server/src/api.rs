@@ -99,6 +99,12 @@ struct DisconnectReq {
     user: String,
 }
 
+#[derive(Deserialize, Default)]
+struct RpcReq {
+    #[serde(default)]
+    method: String,
+}
+
 #[derive(Serialize)]
 struct PresenceResult {
     presence: HashMap<String, ClientInfo>,
@@ -230,13 +236,9 @@ async fn run_protobuf(node: &Arc<Node>, body: &[u8], req_ct: &str) -> Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
         }
     }
-    // Echo the request Content-Type (Go), defaulting to the protobuf type.
-    let ct = if req_ct.is_empty() {
-        "application/octet-stream".to_string()
-    } else {
-        req_ct.to_string()
-    };
-    ([(axum::http::header::CONTENT_TYPE, ct)], out).into_response()
+    // Echo the request Content-Type verbatim (Go sets the response header to the
+    // raw request value — empty stays empty); the codec was already selected above.
+    ([(axum::http::header::CONTENT_TYPE, req_ct.to_string())], out).into_response()
 }
 
 /// Decode the NDJSON command body, dispatch each, and return the NDJSON replies.
@@ -255,13 +257,9 @@ async fn run_commands(node: &Arc<Node>, body: &str, req_ct: &str) -> Response {
         buf.push_str(&serde_json::to_string(&reply).unwrap_or_else(|_| "{}".into()));
         buf.push('\n');
     }
-    // Echo the request Content-Type (Go), defaulting to JSON.
-    let ct = if req_ct.is_empty() {
-        "application/json".to_string()
-    } else {
-        req_ct.to_string()
-    };
-    ([(axum::http::header::CONTENT_TYPE, ct)], buf).into_response()
+    // Echo the request Content-Type verbatim (Go sets the response header to the
+    // raw request value — empty stays empty); the codec was already selected above.
+    ([(axum::http::header::CONTENT_TYPE, req_ct.to_string())], buf).into_response()
 }
 
 /// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`.
@@ -271,11 +269,14 @@ fn authorized(auth: &ApiAuth, headers: &HeaderMap, query: Option<&str>) -> bool 
     if !auth.key.is_empty() {
         if let Some(h) = headers.get(axum::http::header::AUTHORIZATION) {
             if let Ok(s) = h.to_str() {
-                let mut parts = s.split_whitespace();
-                if let (Some(scheme), Some(val)) = (parts.next(), parts.next()) {
-                    if scheme.eq_ignore_ascii_case("apikey") && val == auth.key {
-                        return true;
-                    }
+                // Go middleware/auth requires exactly two fields (`apikey <KEY>`);
+                // a trailing token (`apikey K extra`) is rejected.
+                let parts: Vec<&str> = s.split_whitespace().collect();
+                if parts.len() == 2
+                    && parts[0].eq_ignore_ascii_case("apikey")
+                    && parts[1] == auth.key
+                {
+                    return true;
                 }
             }
         }
@@ -494,6 +495,17 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                     .collect(),
             },
         ),
+        "rpc" => {
+            // No server-side RPC extension is registered, so this mirrors the
+            // protobuf path (and Go api.go RPC): an empty inner method is
+            // BadRequest(107), otherwise MethodNotFound(104).
+            let r: RpcReq = req!(RpcReq);
+            if r.method.is_empty() {
+                err(id, 107, "bad request")
+            } else {
+                err(id, 104, "method not found")
+            }
+        }
         _ => err(id, 104, "method not found"),
     }
 }
