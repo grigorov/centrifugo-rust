@@ -157,6 +157,22 @@ pub struct RefreshResult {
     pub ttl: u32,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SubRefreshRequest {
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub token: String,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SubRefreshResult {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expires: bool,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub ttl: u32,
+}
+
 // ---- Presence ----
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

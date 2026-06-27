@@ -8,8 +8,8 @@
 use crate::messages::{
     ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, Join, Leave,
     PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, Publication,
-    PublishRequest, PublishResult, RefreshRequest, RefreshResult, SubscribeRequest,
-    SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    PublishRequest, PublishResult, RefreshRequest, RefreshResult, SubRefreshRequest,
+    SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{pb, Command, Error, Push, Reply};
@@ -387,6 +387,39 @@ impl From<pb::RefreshResult> for RefreshResult {
         RefreshResult {
             client: r.client,
             version: r.version,
+            expires: r.expires,
+            ttl: r.ttl,
+        }
+    }
+}
+
+impl From<pb::SubRefreshRequest> for SubRefreshRequest {
+    fn from(r: pb::SubRefreshRequest) -> Self {
+        SubRefreshRequest {
+            channel: r.channel,
+            token: r.token,
+        }
+    }
+}
+impl From<SubRefreshRequest> for pb::SubRefreshRequest {
+    fn from(r: SubRefreshRequest) -> Self {
+        pb::SubRefreshRequest {
+            channel: r.channel,
+            token: r.token,
+        }
+    }
+}
+impl From<SubRefreshResult> for pb::SubRefreshResult {
+    fn from(r: SubRefreshResult) -> Self {
+        pb::SubRefreshResult {
+            expires: r.expires,
+            ttl: r.ttl,
+        }
+    }
+}
+impl From<pb::SubRefreshResult> for SubRefreshResult {
+    fn from(r: pb::SubRefreshResult) -> Self {
+        SubRefreshResult {
             expires: r.expires,
             ttl: r.ttl,
         }

@@ -11,8 +11,8 @@ use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
     ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, PingResult,
     PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, PublishRequest,
-    PublishResult, RefreshRequest, RefreshResult, SubscribeRequest, SubscribeResult,
-    UnsubscribeRequest, UnsubscribeResult,
+    PublishResult, RefreshRequest, RefreshResult, SubRefreshRequest, SubRefreshResult,
+    SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
@@ -143,10 +143,7 @@ impl Client {
                 CommandOutcome::replies(self.on_presence_stats(cmd).await)
             }
             MethodType::History => CommandOutcome::replies(self.on_history(cmd).await),
-            // SUB_REFRESH lands with private channels (M6).
-            MethodType::SubRefresh => {
-                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())])
-            }
+            MethodType::SubRefresh => self.on_sub_refresh(cmd),
         }
     }
 
@@ -552,6 +549,73 @@ impl Client {
             // RefreshReply{Expired:true} path (NOT a 110 error reply).
             Err(VerifyError::Expired) => CommandOutcome::disconnect(Disconnect::expired()),
             // Invalid refresh token -> close (3002).
+            Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
+        }
+    }
+
+    /// SUB_REFRESH: refresh a subscription's expiry with a new subscription token.
+    /// Mirrors centrifuge handleSubRefresh + centrifugo OnSubRefresh: empty
+    /// channel / params decode error -> DisconnectBadRequest (3003); not
+    /// subscribed -> PermissionDenied (103); server-side subscription -> 3003;
+    /// invalid token or client/channel mismatch -> DisconnectInvalidToken (3002);
+    /// expired token -> a success reply with no expiry (Go's SubRefreshReply
+    /// ignores `Expired`); valid token -> SubRefreshResult{expires, ttl} and the
+    /// subscription's expiry/info are updated.
+    fn on_sub_refresh(&mut self, cmd: &Command) -> CommandOutcome {
+        let req: SubRefreshRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
+        };
+        if req.channel.is_empty() {
+            return CommandOutcome::disconnect(Disconnect::bad_request());
+        }
+        match self.subscriptions.get(&req.channel) {
+            // Server-side subscriptions can't be refreshed by a client command.
+            Some(s) if s.server_side => {
+                return CommandOutcome::disconnect(Disconnect::bad_request())
+            }
+            Some(_) => {}
+            // Must be subscribed to refresh.
+            None => return CommandOutcome::replies(vec![Reply::err(
+                cmd.id,
+                Error::permission_denied(),
+            )]),
+        }
+        match self.node.verifier().verify_subscribe_token(&req.token) {
+            Ok(t) => {
+                if t.client != self.id || t.channel != req.channel {
+                    return CommandOutcome::disconnect(Disconnect::invalid_token());
+                }
+                let expire_at = t.expire_at;
+                let (expires, ttl) = if expire_at > 0 {
+                    let ttl = expire_at - now_unix();
+                    if ttl <= 0 {
+                        return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::expired())]);
+                    }
+                    (true, ttl as u32)
+                } else {
+                    (false, 0)
+                };
+                if let Some(s) = self.subscriptions.get_mut(&req.channel) {
+                    s.expire_at = expire_at;
+                    s.chan_info = t.info;
+                }
+                let result = SubRefreshResult { expires, ttl };
+                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
+            }
+            // Go quirk: an expired sub-refresh token yields a success reply with
+            // no expiry (centrifuge ignores SubRefreshReply.Expired); clear the
+            // subscription's expiry to match.
+            Err(VerifyError::Expired) => {
+                if let Some(s) = self.subscriptions.get_mut(&req.channel) {
+                    s.expire_at = 0;
+                }
+                let result = SubRefreshResult {
+                    expires: false,
+                    ttl: 0,
+                };
+                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
+            }
             Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
         }
     }
