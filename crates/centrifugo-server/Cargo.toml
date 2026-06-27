@@ -26,7 +26,9 @@ anyhow = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+# rustls (pure Rust) + bundled webpki CA roots: no OpenSSL and no system cert
+# store, so the binary can link fully static (musl) with TLS self-contained.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots", "http2", "charset"] }
 base64 = "0.22"
 tonic = "0.12"
 prost = "0.13"

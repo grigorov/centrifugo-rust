@@ -95,7 +95,7 @@ cargo test --workspace
 
 ### Docker
 
-A multi-stage `Dockerfile` builds a minimal runtime image, and `compose.yml` brings up a **two-node cluster sharing one Redis** (the Redis engine fans publications across nodes):
+The multi-stage `Dockerfile` builds a **fully static binary** (musl libc + rustls TLS with bundled CA roots — no OpenSSL, no glibc, no system cert store) and ships it on `scratch`, so the image is just the self-contained ~11 MB binary with zero runtime dependencies. `compose.yml` brings up a **two-node cluster sharing one Redis** (the Redis engine fans publications across nodes):
 
 ```bash
 docker compose up --build

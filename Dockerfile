@@ -1,36 +1,39 @@
 # syntax=docker/dockerfile:1
+#
+# Produces a FULLY STATIC binary (musl libc, rustls TLS with bundled CA roots —
+# no OpenSSL, no glibc, no system cert store) and ships it on `scratch`, so the
+# final image is just the self-contained binary.
 
-# ---- builder: compile the centrifugo binary (release) ----
+# ---- builder: static binary via musl ----
 FROM rust:1-bookworm AS builder
 WORKDIR /src
 
-# openssl-sys (reqwest native-tls) needs these to build; protobuf is compiled in
-# pure Rust (protox), so no protoc is required.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        pkg-config libssl-dev \
+# musl toolchain for the static target. ring's C bits compile with musl-gcc.
+# (No pkg-config/libssl-dev needed — rustls replaced OpenSSL.)
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
-# Build only the server binary (not the conformance test crate). A cargo registry
-# cache mount speeds repeat builds without leaving target/ in a cache (so the
-# binary stays copyable in the next stage).
+# Build the static binary for the builder's NATIVE arch (no cross-compile).
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    cargo build --release -p centrifugo-server
+    set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  TARGET=x86_64-unknown-linux-musl ;; \
+      aarch64) TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    export CC_x86_64_unknown_linux_musl=musl-gcc CC_aarch64_unknown_linux_musl=musl-gcc; \
+    rustup target add "$TARGET"; \
+    cargo build --release --target "$TARGET" -p centrifugo-server; \
+    cp "target/$TARGET/release/centrifugo" /centrifugo
 
-# ---- runtime: minimal image with just the binary ----
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --user-group centrifugo
-
-COPY --from=builder /src/target/release/centrifugo /usr/local/bin/centrifugo
-
-USER centrifugo
-# 8000 = HTTP (WebSocket/SockJS, API, admin, metrics); 10000 = gRPC API.
+# ---- runtime: scratch (nothing but the static binary) ----
+FROM scratch
+COPY --from=builder /centrifugo /centrifugo
+# Numeric UID (no /etc/passwd on scratch); ports 8000 HTTP, 10000 gRPC.
+USER 10001
 EXPOSE 8000 10000
-
-ENTRYPOINT ["centrifugo"]
-# Sensible default for `docker run`; compose overrides `command:` with the cluster config.
+ENTRYPOINT ["/centrifugo"]
+# Default for `docker run`; compose overrides `command:` with the cluster config.
 CMD ["serve", "--address", "0.0.0.0", "--client_insecure"]
