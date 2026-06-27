@@ -23,6 +23,7 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | Client commands | ✅ connect, subscribe, publish, unsubscribe, presence, presence_stats, history, refresh, ping, send, rpc, sub_refresh |
 | History & recovery | ✅ seq/gen, recovery on (re)subscribe, descending order |
 | Presence + join/leave | ✅ presence TTL (Redis) + per-connection refresh timer |
+| Token expiry enforcement | ✅ timer disconnects expired connections (3005) / subscriptions (3006) after a grace window |
 | Server-side channels | ✅ `subs` in connect, JWT `channels` → auto-subscribe |
 | User-limited (`#`) channels | ✅ `name#u1,u2` membership check |
 | Publish permission | ✅ `publish` / `subscribe_to_publish` channel options |
@@ -184,11 +185,10 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 - **Redis mid-flight failover re-resolution.** The Sentinel master is resolved at startup; live re-discovery after a failover during operation is not yet wired.
 - **Admin live node-stats** over the admin WebSocket channel (login + `/admin/api` polling work; the real-time stats stream is not wired).
 - **Personal channels** (`user_subscribe_to_personal`) auto-subscribe.
-- **Timer-enforced expiry.** Connection/subscription expiry is client-refresh-driven; a server-side timer that force-disconnects expired subscriptions (`DisconnectSubExpired`) is not yet wired.
 - **`admin_web_path` arbitrary tree.** The override serves the standard bundle's assets; an arbitrary file tree under the path is not generalized (the stock `centrifugal/web` bundle is exactly the embedded set).
 
 ---
 
 ## Status
 
-All milestones M0–M12 plus the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI) are complete. **170 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full compatibility audit resolved 17 divergences from the Go reference.
+All milestones M0–M12 plus the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI) are complete. **171 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full compatibility audit resolved 17 divergences from the Go reference.
