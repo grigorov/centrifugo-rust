@@ -276,10 +276,23 @@ impl RefreshProxy for HttpRefreshProxy {
                 ..Default::default()
             }));
         };
+        // Go refresh_handler: a malformed base64 info is ErrorInternal(100) — a
+        // distinct outcome from a transport failure (the function's `Err`, which
+        // the caller turns into the +60s graceful path). So surface it as an
+        // explicit proxy Error here rather than via `?`.
+        let info = match decode_gated(r.info, r.b64info, &req.protocol) {
+            Ok(i) => i,
+            Err(_) => {
+                return Ok(ProxyOutcome::Error {
+                    code: 100,
+                    message: "internal server error".into(),
+                })
+            }
+        };
         Ok(ProxyOutcome::Result(RefreshCreds {
             expired: r.expired,
             expire_at: r.expire_at,
-            info: decode_gated(r.info, r.b64info, &req.protocol)?,
+            info,
         }))
     }
 }
@@ -476,5 +489,66 @@ impl RpcProxy for HttpRpcProxy {
         Ok(ProxyOutcome::Result(RpcData {
             data: decode_gated(r.data, r.b64data, &req.protocol)?,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal one-shot HTTP server returning `body` for any request.
+    async fn mock(body: &str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = body.to_string();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://127.0.0.1:{}/proxy", addr.port())
+    }
+
+    #[tokio::test]
+    async fn refresh_proxy_bad_base64_is_internal_error() {
+        // A binary (protobuf) client decodes b64info; malformed base64 -> 100,
+        // NOT the +60s transport-error path.
+        let url = mock(r#"{"result":{"b64info":"!!notbase64!!","expire_at":9999999999}}"#).await;
+        let proxy = HttpRefreshProxy::new(url);
+        let req = ProxyRequest {
+            protocol: "protobuf".into(),
+            ..Default::default()
+        };
+        match proxy.refresh(req).await.unwrap() {
+            ProxyOutcome::Error { code, .. } => assert_eq!(code, 100),
+            _ => panic!("malformed b64 must be ErrorInternal(100)"),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_proxy_json_ignores_b64info() {
+        // A JSON client uses the raw `info` field only; b64info (even malformed)
+        // is ignored, so the refresh still succeeds.
+        let url = mock(r#"{"result":{"b64info":"!!notbase64!!","expire_at":9999999999}}"#).await;
+        let proxy = HttpRefreshProxy::new(url);
+        let req = ProxyRequest {
+            protocol: "json".into(),
+            ..Default::default()
+        };
+        match proxy.refresh(req).await.unwrap() {
+            ProxyOutcome::Result(c) => {
+                assert!(c.info.is_none(), "json must ignore b64info");
+                assert_eq!(c.expire_at, 9999999999);
+            }
+            _ => panic!("json client must not error on b64info"),
+        }
     }
 }
