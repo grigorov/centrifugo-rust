@@ -43,6 +43,9 @@ services:
       - --admin_password=password
       - --admin_secret=admin-secret
       - --grpc_api
+      - --history_size=100
+      - --history_lifetime=300
+      - --history_recover
 
   node-2:
     image: centrifugo-rust:local
@@ -67,3 +70,6 @@ services:
       - --admin_password=password
       - --admin_secret=admin-secret
       - --grpc_api
+      - --history_size=100
+      - --history_lifetime=300
+      - --history_recover

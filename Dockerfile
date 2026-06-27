@@ -13,10 +13,23 @@ WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools \
     && rm -rf /var/lib/apt/lists/*
 
+# Add the musl std target in its OWN layer, BEFORE copying source — so the (often
+# slow) `rust-std` download is cached and is NOT repeated on every source change.
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  TARGET=x86_64-unknown-linux-musl ;; \
+      aarch64) TARGET=aarch64-unknown-linux-musl ;; \
+      *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    rustup target add "$TARGET"
+
 COPY . .
 
-# Build the static binary for the builder's NATIVE arch (no cross-compile).
+# Build the static binary for the builder's NATIVE arch (no cross-compile). With
+# the target cached above and a target/registry cache mount, source-only changes
+# rebuild in seconds.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
     set -eux; \
     case "$(uname -m)" in \
       x86_64)  TARGET=x86_64-unknown-linux-musl ;; \
@@ -24,7 +37,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
     esac; \
     export CC_x86_64_unknown_linux_musl=musl-gcc CC_aarch64_unknown_linux_musl=musl-gcc; \
-    rustup target add "$TARGET"; \
     cargo build --release --target "$TARGET" -p centrifugo-server; \
     cp "target/$TARGET/release/centrifugo" /centrifugo
 
