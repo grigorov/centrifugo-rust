@@ -202,7 +202,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 ## Out of scope (deferred)
 
 - **Redis Cluster / sharding.** Only single-master Redis (directly or via Sentinel) is supported — no consistent-hash sharding across multiple Redis shards.
-- **Go⇄Rust control-message interop.** Live pub/sub, history, and presence all interop across Go + Rust nodes on a shared Redis (centrifuge wire format). Only cross-node control commands (the server API's unsubscribe/disconnect) ride a Rust-only channel, so those don't propagate to Go nodes.
+- **Cross-node control interop with Go nodes.** Server-side `unsubscribe`/`disconnect` propagate cluster-wide **among Rust nodes**, but over a Rust-only Redis channel (JSON), not centrifuge's protobuf control protocol — so in a *mixed* Go+Rust cluster they don't reach Go nodes. (Live pub/sub, history, and presence *do* interop with Go — those are listed under "What's implemented".)
 - **A live Sentinel-failover integration test.** Mid-flight master re-resolution is implemented, but a CI test that actually fails a master over needs a replica + Sentinel-promotion harness (the live scenario is verified manually).
 
 ---

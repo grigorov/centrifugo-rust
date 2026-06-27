@@ -202,7 +202,7 @@ cargo test --workspace
 ## Что осталось за рамками (отложено)
 
 - **Redis Cluster / шардинг.** Поддерживается только одномастерный Redis (напрямую или через Sentinel) — без шардинга по consistent-hash на несколько Redis-шардов.
-- **Interop control-сообщений Go⇄Rust.** Живой pub/sub, история и presence interop-ятся между Go- и Rust-узлами на общем Redis (wire-формат centrifuge). Только межузловые control-команды (серверные unsubscribe/disconnect API) идут по Rust-только каналу и до Go-узлов не доходят.
+- **Межузловой interop control-команд с Go-узлами.** Серверные `unsubscribe`/`disconnect` расходятся по всему кластеру **среди Rust-узлов**, но по Rust-только Redis-каналу (JSON), а не по protobuf-control-протоколу centrifuge — поэтому в *смешанном* Go+Rust кластере до Go-узлов не доходят. (Живой pub/sub, история и presence с Go interop-ятся — они в разделе «Что реализовано».)
 - **Интеграционный тест live-failover Sentinel.** Переобнаружение мастера «на лету» реализовано, но CI-тест с реальным падением мастера требует харнеса с репликой + промоушеном Sentinel (живой сценарий проверен вручную).
 
 ---
