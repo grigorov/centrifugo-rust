@@ -52,10 +52,10 @@
 |---|---|
 | `centrifugo-protocol` | Проводной формат: конверты Command/Reply/Push, NDJSON (inline-raw JSON), protobuf с uvarint-префиксом длины, коды ошибок (100–111), коды disconnect (3000–3013), кодек JSON/Protobuf |
 | `centrifugo-auth` | Проверка JWT (HMAC/RSA/ECDSA), JWKS по `kid`, ручная проверка exp/nbf, токены подписки, генерация токенов |
-| `centrifugo-core` | `Node`, шардированный `Hub`, конечный автомат `Client`, состояние каждой подписки, абстракция `Engine` (pub/sub + history + presence), `MemoryEngine`, трейты прокси (connect/refresh/subscribe/publish/rpc) |
+| `centrifugo-core` | `Node`, шардированный `Hub`, конечный автомат `Client`, состояние каждой подписки, абстракция `Engine` (pub/sub + history + presence + control), `MemoryEngine`, трейты прокси (connect/refresh/subscribe/publish/rpc), реестр метрик |
 | `centrifugo-grpc` | Кодогенерация tonic (server + client) из `api.proto` через чистый Rust (`protox`, без `protoc`) |
-| `centrifugo-redis` | `RedisEngine`: межузловой fan-out через Redis PUB/SUB, атомарная история на Lua, presence в hash+zset с TTL, обнаружение мастера через Sentinel |
-| `centrifugo-server` | Бинарник `centrifugo`: CLI, конфиг, HTTP (axum), WebSocket, SockJS, HTTP-/gRPC-API, admin, метрики |
+| `centrifugo-redis` | `RedisEngine`: межузловой fan-out в **wire-формате centrifuge v0.14.2** (interop Go⇄Rust), Lua list-история + zset/hash presence, обнаружение мастера через Sentinel + failover «на лету» |
+| `centrifugo-server` | Бинарник `centrifugo`: CLI, конфиг, HTTP (axum), WebSocket, SockJS, HTTP-/gRPC-API, admin, метрики; исходящий TLS (JWKS/прокси) через rustls (без OpenSSL) |
 
 ### Неблокирующий fan-out (ключевое требование)
 
@@ -71,7 +71,7 @@
 `Engine` (async-трейт) объединяет pub/sub + history + presence. Один `Arc<dyn Engine>` стоит за `Node`:
 
 - **MemoryEngine** — одноузловой, всё в памяти. История — кольцевой буфер по размеру + ленивый TTL; presence — карта; meta потока (offset + epoch) сохраняется и после истечения `history_lifetime` (как в Go).
-- **RedisEngine** — мультиузловой. Каждый узел подписан на `centrifugo.pub.*` (PSUBSCRIBE) и маршрутизирует входящие сообщения в локальный hub. История — список + meta-hash (offset, epoch) с атомарным добавлением через Lua. Presence — data-hash `clientID → ClientInfo` плюс zset со временем истечения, атомарное добавление на Lua (HSET+ZADD+PEXPIRE) и чтение с отбраковкой по score, поэтому записи упавшего узла истекают. Мастер можно обнаруживать через **Redis Sentinel** (`redis_master_name` + `redis_sentinels`).
+- **RedisEngine** — мультиузловой, **байт-совместимый с форматом Redis из centrifuge v0.14.2**, поэтому Go- и Rust-узлы могут делить один Redis. Каждый узел подписан на `centrifugo.client.*` (PSUBSCRIBE) и маршрутизирует входящие сообщения — protobuf `Publication` и join/leave с префиксами `__j__`/`__l__` — в локальный hub. История — список (`centrifugo.list.<ch>`, элементы `__<offset>__<protobuf>`, LPUSH) + meta-hash (`s`=offset, `e`=epoch), добавление дословным Lua из centrifuge; presence — data-hash `clientID → protobuf ClientInfo` плюс zset со временем истечения, атомарное добавление/чтение с отбраковкой по score (записи упавшего узла истекают). Мастер обнаруживается через **Redis Sentinel** (`redis_master_name` + `redis_sentinels`) с переобнаружением при failover «на лету». Межузловой control (серверные unsubscribe/disconnect) идёт по Rust-только каналу.
 
 ---
 
@@ -82,6 +82,10 @@
 ```bash
 # Сборка
 cargo build --release          # бинарник: target/release/centrifugo
+
+# Полностью статический бинарь (без glibc/OpenSSL) — см. раздел Docker, или напрямую:
+#   rustup target add x86_64-unknown-linux-musl   # + musl-tools
+#   cargo build --release --target x86_64-unknown-linux-musl -p centrifugo-server
 
 # Запуск в insecure-режиме (без токенов)
 ./target/release/centrifugo serve --client_insecure
@@ -95,7 +99,7 @@ cargo test --workspace
 
 ### Docker
 
-Многостадийный `Dockerfile` собирает **полностью статический бинарь** (musl libc + TLS на rustls со встроенными CA-корнями — без OpenSSL, без glibc, без системного хранилища сертификатов) и кладёт его в `scratch`, так что образ — это просто самодостаточный бинарь ~11 МБ без runtime-зависимостей. `compose.yml` поднимает **кластер из двух узлов на одном Redis** (Redis-движок рассылает публикации между узлами):
+Многостадийный `Dockerfile` собирает **полностью статический бинарь** (musl libc + TLS на rustls со встроенными CA-корнями — без OpenSSL, без glibc, без системного хранилища сертификатов) и кладёт его в `scratch`, так что образ — это просто самодостаточный бинарь без runtime-зависимостей. `compose.yml` поднимает **кластер из двух узлов на одном Redis** (Redis-движок рассылает публикации между узлами):
 
 ```bash
 docker compose up --build

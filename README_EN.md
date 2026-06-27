@@ -52,10 +52,10 @@ The project is split into 6 crates (Cargo workspace):
 |---|---|
 | `centrifugo-protocol` | Wire format: Command/Reply/Push envelopes, NDJSON (inline-raw JSON), uvarint length-prefixed protobuf, error codes (100–111), disconnect codes (3000–3013), JSON/Protobuf codec |
 | `centrifugo-auth` | JWT verification (HMAC/RSA/ECDSA), JWKS by `kid`, manual exp/nbf checks, subscription tokens, token generation |
-| `centrifugo-core` | `Node`, sharded `Hub`, `Client` state machine, per-subscription state, `Engine` abstraction (pub/sub + history + presence), `MemoryEngine`, proxy traits (connect/refresh/subscribe/publish/rpc) |
+| `centrifugo-core` | `Node`, sharded `Hub`, `Client` state machine, per-subscription state, `Engine` abstraction (pub/sub + history + presence + control), `MemoryEngine`, proxy traits (connect/refresh/subscribe/publish/rpc), metrics registry |
 | `centrifugo-grpc` | tonic codegen (server + client) from `api.proto` via pure Rust (`protox`, no `protoc`) |
-| `centrifugo-redis` | `RedisEngine`: cross-node fan-out over Redis PUB/SUB, atomic Lua history, hash+zset presence with TTL, Sentinel master discovery |
-| `centrifugo-server` | The `centrifugo` binary: CLI, config, HTTP (axum), WebSocket, SockJS, HTTP/gRPC API, admin, metrics |
+| `centrifugo-redis` | `RedisEngine`: cross-node fan-out in **centrifuge v0.14.2's wire format** (Go⇄Rust interop), Lua list-history + zset/hash presence, Sentinel discovery + mid-flight failover |
+| `centrifugo-server` | The `centrifugo` binary: CLI, config, HTTP (axum), WebSocket, SockJS, HTTP/gRPC API, admin, metrics; outbound TLS (JWKS/proxies) via rustls (no OpenSSL) |
 
 ### Non-blocking fan-out (the load-bearing requirement)
 
@@ -71,7 +71,7 @@ Broadcasts to **10,000 / 100,000** subscribers never block each other:
 `Engine` (async trait) unifies pub/sub + history + presence. One `Arc<dyn Engine>` backs the `Node`:
 
 - **MemoryEngine** — single node, in-process. History is a size-bounded ring with lazy TTL; presence is a map; the stream meta (offset + epoch) persists past `history_lifetime` expiry (matching Go).
-- **RedisEngine** — multi-node. Each node pattern-subscribes to `centrifugo.pub.*` and routes incoming messages into its local hub. History is a list + meta hash (offset, epoch) with atomic Lua append. Presence is a `clientID → ClientInfo` data hash plus an expiry zset, with atomic Lua add (HSET+ZADD+PEXPIRE) and prune-by-score read, so entries from a crashed node expire. The master can be discovered via **Redis Sentinel** (`redis_master_name` + `redis_sentinels`).
+- **RedisEngine** — multi-node, **byte-compatible with centrifuge v0.14.2's Redis format**, so Go and Rust nodes can share one Redis. Each node pattern-subscribes to `centrifugo.client.*` and routes incoming messages — protobuf `Publication`, plus `__j__`/`__l__`-framed joins/leaves — into its local hub. History is a list (`centrifugo.list.<ch>`, `__<offset>__<protobuf>` entries, LPUSH) + meta hash (`s`=offset, `e`=epoch) appended by the verbatim centrifuge Lua; presence is a `clientID → protobuf ClientInfo` data hash plus an expiry zset, with atomic Lua add/prune-by-score read so crashed-node entries expire. The master can be discovered via **Redis Sentinel** (`redis_master_name` + `redis_sentinels`) with mid-flight failover re-resolution. Cross-node control (server-side unsubscribe/disconnect) rides a Rust-only channel.
 
 ---
 
@@ -82,6 +82,10 @@ Requires Rust (stable). The Go oracle and live-SDK test need Go; the Redis tests
 ```bash
 # Build
 cargo build --release          # binary: target/release/centrifugo
+
+# Fully static binary (no glibc/OpenSSL) — see the Docker section, or directly:
+#   rustup target add x86_64-unknown-linux-musl   # + musl-tools
+#   cargo build --release --target x86_64-unknown-linux-musl -p centrifugo-server
 
 # Run in insecure mode (no tokens)
 ./target/release/centrifugo serve --client_insecure
@@ -95,7 +99,7 @@ cargo test --workspace
 
 ### Docker
 
-The multi-stage `Dockerfile` builds a **fully static binary** (musl libc + rustls TLS with bundled CA roots — no OpenSSL, no glibc, no system cert store) and ships it on `scratch`, so the image is just the self-contained ~11 MB binary with zero runtime dependencies. `compose.yml` brings up a **two-node cluster sharing one Redis** (the Redis engine fans publications across nodes):
+The multi-stage `Dockerfile` builds a **fully static binary** (musl libc + rustls TLS with bundled CA roots — no OpenSSL, no glibc, no system cert store) and ships it on `scratch`, so the image is just the self-contained binary with zero runtime dependencies. `compose.yml` brings up a **two-node cluster sharing one Redis** (the Redis engine fans publications across nodes):
 
 ```bash
 docker compose up --build
