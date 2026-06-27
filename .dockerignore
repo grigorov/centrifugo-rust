@@ -1,0 +1,29 @@
+# Build artifacts (rebuilt inside the image)
+target/
+
+# VCS / editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Docs & meta (not needed to compile)
+*.md
+docs/
+.github/
+
+# Conformance heavy/test-only assets: the vendored Go oracle source + binary and
+# the Go SDK probe are huge and not needed to build the centrifugo binary.
+# (conformance/Cargo.toml + src are kept so the Cargo workspace still resolves.)
+conformance/go-oracle/
+conformance/go-client/
+conformance/tests/
+
+# Pinned dev toolchain (with clippy/rustfmt components) — the base rust image's
+# stable toolchain compiles the binary fine, and skipping this avoids a rustup fetch.
+rust-toolchain.toml
+
+# Docker files themselves
+Dockerfile
+compose.yml
+.dockerignore

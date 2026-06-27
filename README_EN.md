@@ -36,7 +36,7 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | gRPC API (port 10000) | ✅ same 11 RPCs, apikey in metadata |
 | Personal channels | ✅ `user_subscribe_to_personal` auto-subscribe to `#<user>` |
 | Engines | ✅ Memory (single node) **and** Redis (multi-node), incl. **Sentinel** with mid-flight failover re-resolution |
-| Go ⇄ Rust Redis interop | ✅ live pub/sub fan-out across Go + Rust nodes on one Redis (centrifuge wire format) |
+| Go ⇄ Rust Redis interop | ✅ live pub/sub **+ history + presence** across Go + Rust nodes on one Redis (centrifuge wire format) |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ token auth + vendored web UI at `/` |
 | Prometheus metrics (`/metrics`) | ✅ node gauges + per-command/per-message/per-transport counters |
 | Configuration | ✅ flags + JSON file (`-c`) + env (`CENTRIFUGO_*`) |
@@ -92,6 +92,20 @@ cargo build --release          # binary: target/release/centrifugo
 # All tests (unit + conformance)
 cargo test --workspace
 ```
+
+### Docker
+
+A multi-stage `Dockerfile` builds a minimal runtime image, and `compose.yml` brings up a **two-node cluster sharing one Redis** (the Redis engine fans publications across nodes):
+
+```bash
+docker compose up --build
+# node-1 admin UI:  http://localhost:8000/   (password: password)
+# node-2 admin UI:  http://localhost:8001/
+# HTTP API:         POST http://localhost:8000/api   (Authorization: apikey api-secret-key)
+# gRPC API:         localhost:10000
+```
+
+A client subscribed on node-1 receives messages published via node-2's API — demonstrating the cross-node engine. `.dockerignore` keeps the build context lean (no `target/`, vendored Go oracle, or docs).
 
 ### Endpoints
 
@@ -184,11 +198,11 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 ## Out of scope (deferred)
 
 - **Redis Cluster / sharding.** Only single-master Redis (directly or via Sentinel) is supported — no consistent-hash sharding across multiple Redis shards.
-- **Full Go⇄Rust Redis interop.** Live pub/sub fan-out across Go + Rust nodes works (centrifuge wire format); history, presence, and control messages remain Rust-native, so those don't cross-interop with Go nodes.
+- **Go⇄Rust control-message interop.** Live pub/sub, history, and presence all interop across Go + Rust nodes on a shared Redis (centrifuge wire format). Only cross-node control commands (the server API's unsubscribe/disconnect) ride a Rust-only channel, so those don't propagate to Go nodes.
 - **A live Sentinel-failover integration test.** Mid-flight master re-resolution is implemented, but a CI test that actually fails a master over needs a replica + Sentinel-promotion harness (the live scenario is verified manually).
 
 ---
 
 ## Status
 
-All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **186 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.
+All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **190 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.

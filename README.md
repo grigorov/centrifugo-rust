@@ -36,7 +36,7 @@
 | gRPC API (порт 10000) | ✅ те же 11 RPC, apikey в metadata |
 | Персональные каналы | ✅ `user_subscribe_to_personal` — авто-подписка на `#<user>` |
 | Движки | ✅ Memory (один узел) **и** Redis (мультиузловой), вкл. **Sentinel** с переобнаружением мастера при failover «на лету» |
-| Interop Go ⇄ Rust на Redis | ✅ живой pub/sub fan-out между Go- и Rust-узлами на одном Redis (wire-формат centrifuge) |
+| Interop Go ⇄ Rust на Redis | ✅ живой pub/sub **+ история + presence** между Go- и Rust-узлами на одном Redis (wire-формат centrifuge) |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену + вендоренный web UI на `/` |
 | Метрики Prometheus (`/metrics`) | ✅ node-gauges + счётчики по командам/сообщениям/транспортам |
 | Конфигурация | ✅ флаги + JSON-файл (`-c`) + env (`CENTRIFUGO_*`) |
@@ -92,6 +92,20 @@ cargo build --release          # бинарник: target/release/centrifugo
 # Все тесты (юнит + конформанс)
 cargo test --workspace
 ```
+
+### Docker
+
+Многостадийный `Dockerfile` собирает минимальный runtime-образ, а `compose.yml` поднимает **кластер из двух узлов на одном Redis** (Redis-движок рассылает публикации между узлами):
+
+```bash
+docker compose up --build
+# admin UI узла-1:  http://localhost:8000/   (пароль: password)
+# admin UI узла-2:  http://localhost:8001/
+# HTTP API:         POST http://localhost:8000/api   (Authorization: apikey api-secret-key)
+# gRPC API:         localhost:10000
+```
+
+Клиент, подписанный на узле-1, получает сообщения, опубликованные через API узла-2, — демонстрация межузлового движка. `.dockerignore` держит build-контекст компактным (без `target/`, вендоренного Go-оракула и docs).
 
 ### Эндпоинты
 
@@ -184,11 +198,11 @@ cargo test --workspace
 ## Что осталось за рамками (отложено)
 
 - **Redis Cluster / шардинг.** Поддерживается только одномастерный Redis (напрямую или через Sentinel) — без шардинга по consistent-hash на несколько Redis-шардов.
-- **Полный interop Go⇄Rust на Redis.** Живой pub/sub fan-out между Go- и Rust-узлами работает (wire-формат centrifuge); история, presence и control-сообщения остаются Rust-нативными и с Go-узлами не interop-ятся.
+- **Interop control-сообщений Go⇄Rust.** Живой pub/sub, история и presence interop-ятся между Go- и Rust-узлами на общем Redis (wire-формат centrifuge). Только межузловые control-команды (серверные unsubscribe/disconnect API) идут по Rust-только каналу и до Go-узлов не доходят.
 - **Интеграционный тест live-failover Sentinel.** Переобнаружение мастера «на лету» реализовано, но CI-тест с реальным падением мастера требует харнеса с репликой + промоушеном Sentinel (живой сценарий проверен вручную).
 
 ---
 
 ## Статус
 
-Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **186 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.
+Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **190 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.

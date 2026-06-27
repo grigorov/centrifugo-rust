@@ -1,0 +1,69 @@
+# Centrifugo-rust cluster: two nodes sharing one Redis (the Redis engine fans
+# publications out across nodes). A client connected to node-1 receives messages
+# published via node-2's API, demonstrating the multi-node engine.
+#
+#   docker compose up --build
+#   # admin UI:        http://localhost:8000/  (password: password)
+#   # node-2 admin UI: http://localhost:8001/
+#   # HTTP API:        POST http://localhost:8000/api  (Authorization: apikey api-secret-key)
+#   # gRPC API:        localhost:10000
+#
+# Scale the cluster with more nodes the same way (add node-3, etc.).
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  node-1:
+    image: centrifugo-rust:local
+    build: .
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"   # HTTP (WS/SockJS, API, admin, metrics)
+      - "10000:10000" # gRPC API
+    command:
+      - serve
+      - --address=0.0.0.0
+      - --engine=redis
+      - --redis_address=redis:6379
+      - --client_insecure
+      - --api_key=api-secret-key
+      - --admin
+      - --admin_password=password
+      - --admin_secret=admin-secret
+      - --grpc_api
+
+  node-2:
+    image: centrifugo-rust:local
+    # Reuses the image built by node-1 (same tag); no second build.
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      node-1:
+        condition: service_started
+    ports:
+      - "8001:8000"
+      - "10001:10000"
+    command:
+      - serve
+      - --address=0.0.0.0
+      - --engine=redis
+      - --redis_address=redis:6379
+      - --client_insecure
+      - --api_key=api-secret-key
+      - --admin
+      - --admin_password=password
+      - --admin_secret=admin-secret
+      - --grpc_api
