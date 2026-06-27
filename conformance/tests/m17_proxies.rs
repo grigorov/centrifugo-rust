@@ -203,7 +203,10 @@ async fn refresh_command_rejected_in_proxy_mode() {
     c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
         .await;
     let (code, _) = c.next_close().await;
-    assert_eq!(code, 3003, "client REFRESH in proxy mode must disconnect 3003");
+    assert_eq!(
+        code, 3003,
+        "client REFRESH in proxy mode must disconnect 3003"
+    );
 }
 
 #[tokio::test]

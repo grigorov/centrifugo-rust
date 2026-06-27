@@ -1133,7 +1133,8 @@ mod tests {
         use crate::node::{make_route, Namespaces, NodeRegistry};
         let hub = Arc::new(Hub::new());
         let registry = Arc::new(NodeRegistry::new("test".into()));
-        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub, &registry, true)));
+        let engine: Arc<dyn Engine> =
+            Arc::new(MemoryEngine::new(make_route(&hub, &registry, true)));
         let proxies = Proxies {
             refresh: Some(proxy),
             ..Default::default()
@@ -1174,13 +1175,19 @@ mod tests {
         c.authenticated = true;
         c.expire_at = now_unix() + 5; // within the 25s lookahead → due
         assert!(c.proactive_refresh(25).await.is_none(), "extend → no close");
-        assert!(c.expire_at > now_unix() + 3000, "expire_at must be extended");
+        assert!(
+            c.expire_at > now_unix() + 3000,
+            "expire_at must be extended"
+        );
 
         // Not due yet: a far-future expiry must not call the proxy or change state.
         c.expire_at = now_unix() + 10_000;
         let before = c.expire_at;
         assert!(c.proactive_refresh(25).await.is_none());
-        assert_eq!(c.expire_at, before, "not-due refresh must not change expiry");
+        assert_eq!(
+            c.expire_at, before,
+            "not-due refresh must not change expiry"
+        );
 
         // Proxy says expired → DisconnectExpired (3005).
         let node = node_with_refresh(Arc::new(StubRefresh {

@@ -238,7 +238,11 @@ async fn run_protobuf(node: &Arc<Node>, body: &[u8], req_ct: &str) -> Response {
     }
     // Echo the request Content-Type verbatim (Go sets the response header to the
     // raw request value — empty stays empty); the codec was already selected above.
-    ([(axum::http::header::CONTENT_TYPE, req_ct.to_string())], out).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, req_ct.to_string())],
+        out,
+    )
+        .into_response()
 }
 
 /// Decode the NDJSON command body, dispatch each, and return the NDJSON replies.
@@ -259,7 +263,11 @@ async fn run_commands(node: &Arc<Node>, body: &str, req_ct: &str) -> Response {
     }
     // Echo the request Content-Type verbatim (Go sets the response header to the
     // raw request value — empty stays empty); the codec was already selected above.
-    ([(axum::http::header::CONTENT_TYPE, req_ct.to_string())], buf).into_response()
+    (
+        [(axum::http::header::CONTENT_TYPE, req_ct.to_string())],
+        buf,
+    )
+        .into_response()
 }
 
 /// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`.

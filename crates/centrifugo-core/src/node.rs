@@ -303,8 +303,11 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let registry = Arc::new(NodeRegistry::new(uuid::Uuid::new_v4().to_string()));
-        let engine: Arc<dyn Engine> =
-            Arc::new(MemoryEngine::new(make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN)));
+        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(
+            &hub,
+            &registry,
+            DEFAULT_USE_SEQ_GEN,
+        )));
         Self::new_with_engine(
             hub,
             engine,

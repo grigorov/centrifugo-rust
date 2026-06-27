@@ -514,8 +514,13 @@ impl RedisEngine {
                         }
                         match subscribe(&client, &sub_prefix).await {
                             Ok(pubsub) => {
-                                run_pubsub(pubsub, route.clone(), sub_uid.clone(), sub_prefix.clone())
-                                    .await
+                                run_pubsub(
+                                    pubsub,
+                                    route.clone(),
+                                    sub_uid.clone(),
+                                    sub_prefix.clone(),
+                                )
+                                .await
                             }
                             Err(e) => tracing::warn!("sentinel subscribe: {e}"),
                         }

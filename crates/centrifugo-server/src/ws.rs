@@ -102,10 +102,10 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     // also reading client commands.
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
+    let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
     // Expiry/refresh are checked on their own (faster) timer, decoupled from the
     // presence ping. Look ahead one presence interval so a refresh-proxy token is
     // renewed before it lapses.
-    let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
     let mut expiry = tokio::time::interval(EXPIRY_CHECK_INTERVAL);
     expiry.tick().await; // consume the immediate first tick
     'read: loop {

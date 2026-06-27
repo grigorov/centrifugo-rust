@@ -36,9 +36,9 @@ fn is_push(t: &str) -> bool {
     t.contains(r#""channel":"bench""#)
 }
 
-async fn connect_sub(ws_url: &str) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+async fn connect_sub(
+    ws_url: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let (mut ws, _) = connect_async(ws_url).await.expect("ws connect");
     ws.send(Message::Text(r#"{"id":1,"params":{}}"#.into()))
         .await
@@ -197,7 +197,10 @@ async fn bench(label: &str, ws_url: &str, http: &str) -> (f64, f64, f64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "perf benchmark — run with --ignored --nocapture"]
 async fn compare_rust_vs_go() {
-    println!("\n=== perf: {SUBS} subscribers × {PUBS} publishes = {} deliveries ===", SUBS * PUBS);
+    println!(
+        "\n=== perf: {SUBS} subscribers × {PUBS} publishes = {} deliveries ===",
+        SUBS * PUBS
+    );
 
     let rust = Server::start_with_config(CFG).await;
     let (r_tput, r_med, _r_p95) = bench("rust", &rust.ws_url(), &rust.http).await;
