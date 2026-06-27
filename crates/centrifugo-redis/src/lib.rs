@@ -259,11 +259,18 @@ fn encode_control(node_uid: &str, msg: &ControlMessage) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// Decode a centrifuge `controlpb.Command` into our `ControlMessage`. Returns
-/// `None` for node-info pings (method NODE) and anything undecodable.
-fn decode_control(bytes: &[u8]) -> Option<ControlMessage> {
+/// Decode a centrifuge `controlpb.Command` into our `ControlMessage`. NODE pings
+/// are decoded into `ControlMessage::Node` (used to register remote nodes); only
+/// our own loopback (origin uid == `self_uid`) and undecodable/unknown-method
+/// commands yield `None`. Skipping our own message mirrors Go handleControl: this
+/// node already applied server-side unsubscribe/disconnect to its local hub before
+/// publishing, and its own NODE ping is redundant (self is seeded in the registry).
+fn decode_control(bytes: &[u8], self_uid: &str) -> Option<ControlMessage> {
     use centrifugo_protocol::controlpb;
     let cmd = controlpb::Command::decode(bytes).ok()?;
+    if cmd.uid == self_uid {
+        return None;
+    }
     match controlpb::MethodType::try_from(cmd.method).ok()? {
         controlpb::MethodType::Unsubscribe => {
             let u = controlpb::Unsubscribe::decode(&cmd.params[..]).ok()?;
@@ -309,14 +316,14 @@ async fn subscribe(client: &redis::Client) -> anyhow::Result<redis::aio::PubSub>
 
 /// Route one pub/sub message (centrifuge-framed publication/join/leave, or a
 /// centrifuge control command for cross-node unsubscribe/disconnect).
-fn dispatch_message(msg: &redis::Msg, route: &RouteFn) {
+fn dispatch_message(msg: &redis::Msg, route: &RouteFn, self_uid: &str) {
     let topic = msg.get_channel_name();
     let payload: Vec<u8> = match msg.get_payload() {
         Ok(p) => p,
         Err(_) => return,
     };
     if topic == format!("{PREFIX}.control") {
-        if let Some(cmd) = decode_control(&payload) {
+        if let Some(cmd) = decode_control(&payload, self_uid) {
             route(NodeMessage::Control(cmd));
         }
         return;
@@ -357,10 +364,10 @@ fn dispatch_message(msg: &redis::Msg, route: &RouteFn) {
 }
 
 /// Drain a pub/sub connection until it ends (a disconnect), routing each message.
-async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn) {
+async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn, self_uid: String) {
     let mut stream = pubsub.into_on_message();
     while let Some(msg) = stream.next().await {
-        dispatch_message(&msg, &route);
+        dispatch_message(&msg, &route, &self_uid);
     }
 }
 
@@ -391,7 +398,7 @@ impl RedisEngine {
         let client = redis::Client::open(info)?;
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         let pubsub = subscribe(&client).await?;
-        tokio::spawn(run_pubsub(pubsub, route));
+        tokio::spawn(run_pubsub(pubsub, route, node_uid.clone()));
         Ok(RedisEngine { mgr, node_uid })
     }
 
@@ -447,9 +454,10 @@ impl RedisEngine {
         let sentinel = Arc::new(Mutex::new(sentinel));
         let master = master_name.to_string();
         let mgr_watch = mgr.clone();
+        let sub_uid = node_uid.clone();
         tokio::spawn(async move {
             // First run uses the already-subscribed connection.
-            run_pubsub(pubsub, route.clone()).await;
+            run_pubsub(pubsub, route.clone(), sub_uid.clone()).await;
             // On disconnect (e.g. master failover), re-resolve via Sentinel, rebuild
             // the pub/sub subscription, and repoint the command manager.
             loop {
@@ -467,7 +475,7 @@ impl RedisEngine {
                             Err(e) => tracing::warn!("sentinel manager rebuild: {e}"),
                         }
                         match subscribe(&client).await {
-                            Ok(pubsub) => run_pubsub(pubsub, route.clone()).await,
+                            Ok(pubsub) => run_pubsub(pubsub, route.clone(), sub_uid.clone()).await,
                             Err(e) => tracing::warn!("sentinel subscribe: {e}"),
                         }
                     }
@@ -728,7 +736,7 @@ mod tests {
             whitelist: vec!["client-abc".into(), "client-def".into()],
         };
         let bytes = encode_control("node-1", &msg);
-        let decoded = decode_control(&bytes).expect("decodes");
+        let decoded = decode_control(&bytes, "node-2").expect("decodes");
         match decoded {
             ControlMessage::Disconnect {
                 user,
@@ -756,12 +764,34 @@ mod tests {
                 channel: "news".into(),
             },
         );
-        match decode_control(&bytes).expect("decodes") {
+        match decode_control(&bytes, "node-2").expect("decodes") {
             ControlMessage::Unsubscribe { user, channel } => {
                 assert_eq!(user, "u2");
                 assert_eq!(channel, "news");
             }
             _ => panic!("expected Unsubscribe"),
         }
+    }
+
+    #[test]
+    fn own_loopback_control_is_skipped() {
+        // A control message originating from this node (uid == self_uid) is skipped
+        // on the bus: the issuing node already applied it to its local hub, so the
+        // loopback must not double-apply (Go handleControl own-uid skip).
+        let bytes = encode_control(
+            "node-1",
+            &ControlMessage::Unsubscribe {
+                user: "u".into(),
+                channel: "c".into(),
+            },
+        );
+        assert!(
+            decode_control(&bytes, "node-1").is_none(),
+            "own-uid control must be skipped"
+        );
+        assert!(
+            decode_control(&bytes, "node-2").is_some(),
+            "another node's control must be applied"
+        );
     }
 }

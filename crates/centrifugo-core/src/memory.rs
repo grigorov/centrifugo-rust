@@ -130,9 +130,11 @@ impl Engine for MemoryEngine {
         Ok(())
     }
 
-    async fn publish_control(&self, msg: crate::engine::ControlMessage) -> anyhow::Result<()> {
-        // Single node: apply locally (no bus).
-        (self.route)(NodeMessage::Control(msg));
+    async fn publish_control(&self, _msg: crate::engine::ControlMessage) -> anyhow::Result<()> {
+        // Single node, no bus: the Node applies server-side unsubscribe/disconnect to
+        // the local hub directly (Node::unsubscribe_user/disconnect_user), and a NODE
+        // ping to ourselves is redundant (self is seeded + live-refreshed in the
+        // registry). Nothing to propagate.
         Ok(())
     }
 

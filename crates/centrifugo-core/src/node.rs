@@ -558,34 +558,35 @@ impl Node {
     /// Unsubscribe all of `user`'s connections from `channel` (empty channel = all
     /// channels), cluster-wide. Each affected client gets an Unsubscribe push.
     pub async fn unsubscribe_user(&self, user: &str, channel: &str) {
-        if let Err(e) = self
-            .engine
-            .publish_control(ControlMessage::Unsubscribe {
-                user: user.to_string(),
-                channel: channel.to_string(),
-            })
-            .await
-        {
+        let msg = ControlMessage::Unsubscribe {
+            user: user.to_string(),
+            channel: channel.to_string(),
+        };
+        // Apply to this node's own connections first, then propagate to other nodes
+        // (Go node.go: hub before bus). The bus subscriber skips our own loopback so
+        // it isn't applied twice — and a publish lost in a Sentinel re-subscribe gap
+        // still affects local clients.
+        apply_control(&self.hub, &self.registry, msg.clone());
+        if let Err(e) = self.engine.publish_control(msg).await {
             tracing::warn!("unsubscribe_user({user}): {e}");
         }
     }
 
     /// Disconnect all of `user`'s connections (cluster-wide) with `code`/`reason`.
     pub async fn disconnect_user(&self, user: &str, code: u32, reason: &str) {
-        if let Err(e) = self
-            .engine
-            .publish_control(ControlMessage::Disconnect {
-                user: user.to_string(),
-                code,
-                reason: reason.to_string(),
-                // The HTTP/gRPC disconnect API issues DisconnectForceNoReconnect
-                // (3012) and exposes no whitelist; cross-node reconnect/whitelist
-                // arrive via the decode path (a Go node may set them).
-                reconnect: false,
-                whitelist: Vec::new(),
-            })
-            .await
-        {
+        let msg = ControlMessage::Disconnect {
+            user: user.to_string(),
+            code,
+            reason: reason.to_string(),
+            // The HTTP/gRPC disconnect API issues DisconnectForceNoReconnect (3012)
+            // and exposes no whitelist; cross-node reconnect/whitelist arrive via the
+            // decode path (a Go node may set them).
+            reconnect: false,
+            whitelist: Vec::new(),
+        };
+        // Apply locally first, then propagate (see unsubscribe_user).
+        apply_control(&self.hub, &self.registry, msg.clone());
+        if let Err(e) = self.engine.publish_control(msg).await {
             tracing::warn!("disconnect_user({user}): {e}");
         }
     }
