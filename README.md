@@ -22,15 +22,18 @@
 | SockJS-fallback (`/connection/sockjs`) | ✅ xhr-polling + `/info` + CORS |
 | Команды клиента | ✅ connect, subscribe, publish, unsubscribe, presence, presence_stats, history, refresh, ping, send, rpc, sub_refresh |
 | История и восстановление (recovery) | ✅ seq/gen, восстановление при (пере)подписке, descending-порядок |
-| Presence + join/leave | ✅ |
+| Presence + join/leave | ✅ TTL presence (Redis) + таймер обновления на каждое соединение |
+| Server-side каналы | ✅ `subs` в connect, JWT `channels` → авто-подписка |
+| User-limited (`#`) каналы | ✅ проверка членства `name#u1,u2` |
+| Разрешение на публикацию | ✅ опции канала `publish` / `subscribe_to_publish` |
 | Аутентификация по JWT | ✅ HMAC (HS256/384/512), RSA (RS*), ECDSA (ES256/384) |
 | JWKS | ✅ выбор ключа по `kid`, фоновое обновление |
-| Connect-proxy (HTTP-callback) | ✅ |
+| Прокси (HTTP-callbacks) | ✅ connect, refresh, subscribe, publish, rpc |
 | Namespaces и приватные каналы (`$`) | ✅ |
-| HTTP API (`POST /api`) | ✅ apikey-аутентификация |
+| HTTP API (`POST /api`) | ✅ apikey-аутентификация; JSON (NDJSON) **и** Protobuf (`application/octet-stream`) |
 | gRPC API (порт 10000) | ✅ те же 11 RPC, apikey в metadata |
-| Движки | ✅ Memory (один узел) **и** Redis (мультиузловой) |
-| Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену |
+| Движки | ✅ Memory (один узел) **и** Redis (мультиузловой), вкл. failover через **Sentinel** |
+| Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену + вендоренный web UI на `/` |
 | Метрики Prometheus (`/metrics`) | ✅ |
 | Конфигурация | ✅ флаги + JSON-файл (`-c`) + env (`CENTRIFUGO_*`) |
 | CLI-подкоманды | ✅ `serve`, `gentoken`, `genconfig`, `checkconfig`, `version` |
@@ -45,9 +48,9 @@
 |---|---|
 | `centrifugo-protocol` | Проводной формат: конверты Command/Reply/Push, NDJSON (inline-raw JSON), protobuf с uvarint-префиксом длины, коды ошибок (100–111), коды disconnect (3000–3013), кодек JSON/Protobuf |
 | `centrifugo-auth` | Проверка JWT (HMAC/RSA/ECDSA), JWKS по `kid`, ручная проверка exp/nbf, токены подписки, генерация токенов |
-| `centrifugo-core` | `Node`, шардированный `Hub`, конечный автомат `Client`, абстракция `Engine` (pub/sub + history + presence), `MemoryEngine`, connect-proxy |
+| `centrifugo-core` | `Node`, шардированный `Hub`, конечный автомат `Client`, состояние каждой подписки, абстракция `Engine` (pub/sub + history + presence), `MemoryEngine`, трейты прокси (connect/refresh/subscribe/publish/rpc) |
 | `centrifugo-grpc` | Кодогенерация tonic (server + client) из `api.proto` через чистый Rust (`protox`, без `protoc`) |
-| `centrifugo-redis` | `RedisEngine`: межузловой fan-out через Redis PUB/SUB, атомарная история на Lua, presence в hash |
+| `centrifugo-redis` | `RedisEngine`: межузловой fan-out через Redis PUB/SUB, атомарная история на Lua, presence в hash+zset с TTL, обнаружение мастера через Sentinel |
 | `centrifugo-server` | Бинарник `centrifugo`: CLI, конфиг, HTTP (axum), WebSocket, SockJS, HTTP-/gRPC-API, admin, метрики |
 
 ### Неблокирующий fan-out (ключевое требование)
@@ -64,7 +67,7 @@
 `Engine` (async-трейт) объединяет pub/sub + history + presence. Один `Arc<dyn Engine>` стоит за `Node`:
 
 - **MemoryEngine** — одноузловой, всё в памяти. История — кольцевой буфер по размеру + ленивый TTL; presence — карта; meta потока (offset + epoch) сохраняется и после истечения `history_lifetime` (как в Go).
-- **RedisEngine** — мультиузловой. Каждый узел подписан на `centrifugo.pub.*` (PSUBSCRIBE) и маршрутизирует входящие сообщения в локальный hub. История — список + meta-hash (offset, epoch) с атомарным добавлением через Lua. Presence — hash `clientID → ClientInfo`.
+- **RedisEngine** — мультиузловой. Каждый узел подписан на `centrifugo.pub.*` (PSUBSCRIBE) и маршрутизирует входящие сообщения в локальный hub. История — список + meta-hash (offset, epoch) с атомарным добавлением через Lua. Presence — data-hash `clientID → ClientInfo` плюс zset со временем истечения, атомарное добавление на Lua (HSET+ZADD+PEXPIRE) и чтение с отбраковкой по score, поэтому записи упавшего узла истекают. Мастер можно обнаруживать через **Redis Sentinel** (`redis_master_name` + `redis_sentinels`).
 
 ---
 
@@ -129,7 +132,7 @@ cargo test --workspace
 }
 ```
 
-Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `proxy_connect_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_password`, `admin_secret`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
+Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_password`, `admin_secret`, `admin_web_path`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
 
 ### CLI-подкоманды
 
@@ -176,14 +179,14 @@ cargo test --workspace
 
 ## Что осталось за рамками (отложено)
 
-- Server-side каналы (поле `subs` в connect): требует реализации серверных подписок целиком.
-- Protobuf-кодек для HTTP API (`application/octet-stream`).
-- Redis Sentinel/Cluster-шардинг; presence-refresh таймер + zset TTL для очистки после падения узла; смешанный Go+Rust кластер на одном Redis (поддерживается однородный Rust-кластер).
-- Admin web UI (готовый JS-бандл из дистрибутива Go — вне рамок; реализован функциональный auth и API).
-- SUB_REFRESH, прокси для subscribe/publish/rpc/refresh, user-limited (`#`) каналы.
+- **Redis Cluster / шардинг.** Поддерживается только одномастерный Redis (напрямую или через Sentinel) — без шардинга по consistent-hash на несколько Redis-шардов.
+- **Смешанный Go+Rust кластер на одном Redis.** Однородный кластер из одних Rust-узлов работает; совместимость с Go-узлами на том же Redis не тестировалась.
+- **Переобнаружение мастера Redis при failover «на лету».** Мастер Sentinel разрешается при старте; живое переобнаружение после failover во время работы пока не подключено.
+- **Живая статистика узлов в admin** через WebSocket-канал admin (логин + опрос `/admin/api` работают; поток статистики в реальном времени не подключён).
+- **Персональные каналы** (`user_subscribe_to_personal`) — авто-подписка.
 
 ---
 
 ## Статус
 
-Все этапы M0–M12 завершены. **133 теста проходят** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. После сквозного аудита совместимости устранены 17 расхождений с эталоном на Go.
+Все этапы M0–M12 плюс фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) завершены. **161 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. После сквозного аудита совместимости устранены 17 расхождений с эталоном на Go.
