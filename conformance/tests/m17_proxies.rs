@@ -58,7 +58,11 @@ async fn rpc_proxy_ack_only_is_success_without_data() {
     c.send_raw(r#"{"id":2,"method":9,"params":{"method":"ack"}}"#).await;
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "ack-only rpc must succeed: {r}");
-    assert!(r["result"]["data"].is_null(), "ack-only rpc has no data: {r}");
+    // Go emits `{}` (data omitempty), not `{"data":null}`.
+    assert!(
+        r["result"].get("data").is_none(),
+        "ack-only rpc must omit data: {r}"
+    );
 }
 
 #[tokio::test]

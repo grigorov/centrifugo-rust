@@ -191,7 +191,9 @@ pub struct RpcRequest {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RpcResult {
-    #[serde(default)]
+    // Go's RPCResult.Data is `omitempty`: an ack-only RPC emits `{}`, not
+    // `{"data":null}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Raw>,
 }
 
