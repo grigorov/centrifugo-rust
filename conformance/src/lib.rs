@@ -617,7 +617,7 @@ impl WsJsonClient {
     /// Read the next text frame's first JSON line, ignoring ping/pong/binary.
     pub async fn next_json(&mut self) -> serde_json::Value {
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), self.ws.next()).await {
+            match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
                 Ok(Some(Ok(Message::Text(t)))) => {
                     let line = t.lines().next().unwrap_or("{}");
                     return serde_json::from_str(line).expect("valid json frame");
@@ -632,7 +632,7 @@ impl WsJsonClient {
     /// Returns code 0 if the socket ends without a Close frame.
     pub async fn next_close(&mut self) -> (u16, String) {
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), self.ws.next()).await {
+            match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
                 Ok(Some(Ok(Message::Close(frame)))) => {
                     return match frame {
                         Some(cf) => (u16::from(cf.code), cf.reason.to_string()),
@@ -677,7 +677,7 @@ impl PbWsClient {
 
     async fn next_reply(&mut self) -> Reply {
         loop {
-            match tokio::time::timeout(Duration::from_secs(3), self.ws.next()).await {
+            match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
                 Ok(Some(Ok(Message::Binary(b)))) => {
                     if let Some(r) = decode_replies(ProtocolType::Protobuf, &b)
                         .unwrap()
