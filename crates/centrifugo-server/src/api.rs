@@ -9,15 +9,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use centrifugo_core::Node;
+use centrifugo_grpc::pb;
 use centrifugo_protocol::messages::ClientInfo;
 use centrifugo_protocol::Raw as ProtoRaw;
+use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+
+use crate::grpc::{
+    api_err, channel_caps as pb_channel_caps, to_pb_client_info, to_pb_publication,
+};
 
 type Raw = Box<RawValue>;
 
@@ -132,12 +139,12 @@ pub async fn api_handler(
     Extension(auth): Extension<ApiAuth>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
-    body: String,
+    body: Bytes,
 ) -> Response {
     if !auth.insecure && !authorized(&auth, &headers, query.as_deref()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    run_commands(&node, &body).await
+    run_api(&node, &headers, &body).await
 }
 
 /// `POST /admin/api` — admin-token-authenticated server API. Go guards this
@@ -148,7 +155,7 @@ pub async fn admin_api_handler(
     State(node): State<Arc<Node>>,
     Extension(admin): Extension<crate::admin::AdminConfig>,
     headers: HeaderMap,
-    body: String,
+    body: Bytes,
 ) -> Response {
     if !admin.enabled || admin.secret.is_empty() {
         return StatusCode::NOT_FOUND.into_response();
@@ -164,7 +171,50 @@ pub async fn admin_api_handler(
     if !authed {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    run_commands(&node, &body).await
+    run_api(&node, &headers, &body).await
+}
+
+/// Dispatch the API request, picking the codec by Content-Type: a protobuf
+/// `application/octet-stream` body is a uvarint-length-delimited pb Command
+/// stream; anything else is NDJSON JSON commands.
+async fn run_api(node: &Arc<Node>, headers: &HeaderMap, body: &[u8]) -> Response {
+    let ct = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+    if ct.starts_with("application/octet-stream") {
+        run_protobuf(node, body).await
+    } else {
+        match std::str::from_utf8(body) {
+            Ok(s) => run_commands(node, s).await,
+            Err(_) => (StatusCode::BAD_REQUEST, "Bad Request").into_response(),
+        }
+    }
+}
+
+/// Protobuf API: decode the uvarint-length-delimited pb Command stream, dispatch
+/// each, and return the uvarint-length-delimited pb Reply stream.
+async fn run_protobuf(node: &Arc<Node>, body: &[u8]) -> Response {
+    if body.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
+    }
+    let mut buf = body;
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        let cmd = match pb::Command::decode_length_delimited(&mut buf) {
+            Ok(c) => c,
+            Err(_) => return (StatusCode::BAD_REQUEST, "Bad Request").into_response(),
+        };
+        let reply = dispatch_pb(node, cmd).await;
+        if reply.encode_length_delimited(&mut out).is_err() {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
+        }
+    }
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        out,
+    )
+        .into_response()
 }
 
 /// Decode the NDJSON command body, dispatch each, and return the NDJSON replies.
@@ -391,5 +441,135 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
             },
         ),
         _ => err(id, 104, "method not found"),
+    }
+}
+
+/// Protobuf API dispatch: decode the pb request for `cmd.method`, call the Node,
+/// and build a pb Reply (mirrors the JSON `dispatch` + the gRPC service). Void
+/// commands carry an empty `result`.
+async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
+    let id = cmd.id;
+    let reply = |error: Option<pb::Error>, result: Vec<u8>| pb::Reply { id, error, result };
+    let method = match pb::MethodType::try_from(cmd.method) {
+        Ok(m) => m,
+        Err(_) => return reply(Some(api_err(104, "method not found")), Vec::new()),
+    };
+    macro_rules! decode {
+        ($t:ty) => {
+            match <$t>::decode(&cmd.params[..]) {
+                Ok(r) => r,
+                Err(_) => return reply(Some(api_err(107, "bad request")), Vec::new()),
+            }
+        };
+    }
+    match method {
+        pb::MethodType::Publish => {
+            let req = decode!(pb::PublishRequest);
+            if req.data.is_empty() {
+                return reply(Some(api_err(107, "bad request")), Vec::new());
+            }
+            if let Err(e) = pb_channel_caps(node, &req.channel) {
+                return reply(Some(e), Vec::new());
+            }
+            node.publish(&req.channel, &req.data, None).await;
+            reply(None, Vec::new())
+        }
+        pb::MethodType::Broadcast => {
+            let req = decode!(pb::BroadcastRequest);
+            if req.channels.is_empty() || req.data.is_empty() {
+                return reply(Some(api_err(107, "bad request")), Vec::new());
+            }
+            if let Some(e) = req.channels.iter().find_map(|ch| pb_channel_caps(node, ch).err()) {
+                return reply(Some(e), Vec::new());
+            }
+            for ch in &req.channels {
+                node.publish(ch, &req.data, None).await;
+            }
+            reply(None, Vec::new())
+        }
+        // Server-initiated unsubscribe/disconnect are deferred; ack as void.
+        pb::MethodType::Unsubscribe => {
+            let _ = decode!(pb::UnsubscribeRequest);
+            reply(None, Vec::new())
+        }
+        pb::MethodType::Disconnect => {
+            let _ = decode!(pb::DisconnectRequest);
+            reply(None, Vec::new())
+        }
+        pb::MethodType::Presence => {
+            let req = decode!(pb::PresenceRequest);
+            match pb_channel_caps(node, &req.channel) {
+                Ok((p, _)) if !p => return reply(Some(api_err(108, "not available")), Vec::new()),
+                Ok(_) => {}
+                Err(e) => return reply(Some(e), Vec::new()),
+            }
+            let presence = node
+                .presence(&req.channel)
+                .await
+                .into_iter()
+                .map(|(k, v)| (k, to_pb_client_info(v)))
+                .collect();
+            reply(None, pb::PresenceResult { presence }.encode_to_vec())
+        }
+        pb::MethodType::PresenceStats => {
+            let req = decode!(pb::PresenceStatsRequest);
+            match pb_channel_caps(node, &req.channel) {
+                Ok((p, _)) if !p => return reply(Some(api_err(108, "not available")), Vec::new()),
+                Ok(_) => {}
+                Err(e) => return reply(Some(e), Vec::new()),
+            }
+            let (num_clients, num_users) = node.presence_stats(&req.channel).await;
+            reply(
+                None,
+                pb::PresenceStatsResult {
+                    num_clients,
+                    num_users,
+                }
+                .encode_to_vec(),
+            )
+        }
+        pb::MethodType::History => {
+            let req = decode!(pb::HistoryRequest);
+            match pb_channel_caps(node, &req.channel) {
+                Ok((_, h)) if !h => return reply(Some(api_err(108, "not available")), Vec::new()),
+                Ok(_) => {}
+                Err(e) => return reply(Some(e), Vec::new()),
+            }
+            let (pubs, _top) = node.history(&req.channel).await;
+            let publications = pubs.into_iter().map(to_pb_publication).collect();
+            reply(None, pb::HistoryResult { publications }.encode_to_vec())
+        }
+        pb::MethodType::HistoryRemove => {
+            let req = decode!(pb::HistoryRemoveRequest);
+            match pb_channel_caps(node, &req.channel) {
+                Ok((_, h)) if !h => return reply(Some(api_err(108, "not available")), Vec::new()),
+                Ok(_) => {}
+                Err(e) => return reply(Some(e), Vec::new()),
+            }
+            node.remove_history(&req.channel).await;
+            reply(None, Vec::new())
+        }
+        pb::MethodType::Channels => reply(
+            None,
+            pb::ChannelsResult {
+                channels: node.hub().channels(),
+            }
+            .encode_to_vec(),
+        ),
+        pb::MethodType::Info => {
+            let hub = node.hub();
+            let nodes = vec![pb::NodeResult {
+                uid: String::new(),
+                name: String::new(),
+                version: crate::VERSION.to_string(),
+                num_clients: hub.num_clients() as u32,
+                num_users: hub.num_users() as u32,
+                num_channels: hub.num_channels() as u32,
+                uptime: 0,
+                metrics: None,
+            }];
+            reply(None, pb::InfoResult { nodes }.encode_to_vec())
+        }
+        pb::MethodType::Rpc => reply(Some(api_err(108, "not available")), Vec::new()),
     }
 }

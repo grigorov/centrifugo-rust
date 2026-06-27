@@ -25,7 +25,7 @@ impl GrpcApi {
     }
 }
 
-fn to_pb_client_info(ci: DomainClientInfo) -> pb::ClientInfo {
+pub(crate) fn to_pb_client_info(ci: DomainClientInfo) -> pb::ClientInfo {
     pb::ClientInfo {
         user: ci.user,
         client: ci.client,
@@ -34,7 +34,7 @@ fn to_pb_client_info(ci: DomainClientInfo) -> pb::ClientInfo {
     }
 }
 
-fn to_pb_publication(p: DomainPublication) -> pb::Publication {
+pub(crate) fn to_pb_publication(p: DomainPublication) -> pb::Publication {
     pb::Publication {
         uid: p.uid,
         data: p.data.map(|r| r.into_bytes()).unwrap_or_default(),
@@ -42,7 +42,7 @@ fn to_pb_publication(p: DomainPublication) -> pb::Publication {
     }
 }
 
-fn api_err(code: u32, message: &str) -> pb::Error {
+pub(crate) fn api_err(code: u32, message: &str) -> pb::Error {
     pb::Error {
         code,
         message: message.into(),
@@ -52,7 +52,7 @@ fn api_err(code: u32, message: &str) -> pb::Error {
 /// Validate a channel for an API command (Go executor parity): empty channel →
 /// BadRequest(107), unknown namespace → NamespaceNotFound(102). Returns
 /// `(presence_enabled, history_enabled)` on success.
-fn channel_caps(node: &Node, channel: &str) -> Result<(bool, bool), pb::Error> {
+pub(crate) fn channel_caps(node: &Node, channel: &str) -> Result<(bool, bool), pb::Error> {
     if channel.is_empty() {
         return Err(api_err(107, "bad request"));
     }
