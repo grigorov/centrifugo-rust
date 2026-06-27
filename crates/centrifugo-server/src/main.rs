@@ -13,7 +13,7 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::{gen_connect_token, TokenVerifier};
-use centrifugo_core::{make_route, ConnectProxy, Engine, Hub, MemoryEngine, Node};
+use centrifugo_core::{make_route, Engine, Hub, MemoryEngine, Node};
 use centrifugo_redis::RedisEngine;
 use clap::Parser;
 
@@ -175,18 +175,7 @@ async fn main() -> anyhow::Result<()> {
             let grpc = settings
                 .grpc_api
                 .then(|| (settings.grpc_socket_addr(), settings.grpc_api_key.clone()));
-            let connect_proxy: Option<Arc<dyn ConnectProxy>> =
-                if settings.proxy_connect_endpoint.is_empty() {
-                    None
-                } else {
-                    tracing::info!(
-                        "connect proxy enabled: {}",
-                        settings.proxy_connect_endpoint
-                    );
-                    Some(Arc::new(proxy_http::HttpConnectProxy::new(
-                        settings.proxy_connect_endpoint.clone(),
-                    )))
-                };
+            let proxies = proxy_http::build_proxies(&settings);
             let hub = Arc::new(Hub::new());
             let engine: Arc<dyn Engine> = match settings.engine.as_str() {
                 "redis" => {
@@ -207,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
                 settings.client_insecure,
                 settings.client_anonymous,
                 settings.namespaces,
-                connect_proxy,
+                proxies,
                 settings.client_presence_ping_interval,
                 settings.client_presence_expire_interval,
             );

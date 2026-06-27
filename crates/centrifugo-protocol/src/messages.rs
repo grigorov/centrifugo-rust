@@ -181,6 +181,20 @@ pub struct SubRefreshResult {
     pub ttl: u32,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RpcRequest {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Raw>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RpcResult {
+    #[serde(default)]
+    pub data: Option<Raw>,
+}
+
 // ---- Presence ----
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

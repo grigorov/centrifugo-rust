@@ -8,8 +8,9 @@
 use crate::messages::{
     ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, Join, Leave,
     PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, Publication,
-    PublishRequest, PublishResult, RefreshRequest, RefreshResult, SubRefreshRequest,
-    SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    PublishRequest, PublishResult, RefreshRequest, RefreshResult, RpcRequest, RpcResult,
+    SubRefreshRequest, SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{pb, Command, Error, Push, Reply};
@@ -450,6 +451,37 @@ impl From<PublishRequest> for pb::PublishRequest {
 impl From<PublishResult> for pb::PublishResult {
     fn from(_: PublishResult) -> Self {
         pb::PublishResult {}
+    }
+}
+
+impl From<pb::RpcRequest> for RpcRequest {
+    fn from(r: pb::RpcRequest) -> Self {
+        RpcRequest {
+            method: r.method,
+            data: vec_to_raw(r.data),
+        }
+    }
+}
+impl From<RpcRequest> for pb::RpcRequest {
+    fn from(r: RpcRequest) -> Self {
+        pb::RpcRequest {
+            method: r.method,
+            data: raw_to_vec(r.data),
+        }
+    }
+}
+impl From<RpcResult> for pb::RpcResult {
+    fn from(r: RpcResult) -> Self {
+        pb::RpcResult {
+            data: raw_to_vec(r.data),
+        }
+    }
+}
+impl From<pb::RpcResult> for RpcResult {
+    fn from(r: pb::RpcResult) -> Self {
+        RpcResult {
+            data: vec_to_raw(r.data),
+        }
     }
 }
 impl From<pb::PublishResult> for PublishResult {

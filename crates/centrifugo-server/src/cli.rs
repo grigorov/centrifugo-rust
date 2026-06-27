@@ -120,6 +120,18 @@ pub struct ServeArgs {
     /// HTTP callback instead of a JWT.
     #[arg(long = "proxy_connect_endpoint", default_value = "")]
     pub proxy_connect_endpoint: String,
+    /// Refresh-proxy endpoint URL (connection refresh via HTTP callback).
+    #[arg(long = "proxy_refresh_endpoint", default_value = "")]
+    pub proxy_refresh_endpoint: String,
+    /// Subscribe-proxy endpoint URL (authorize SUBSCRIBE on proxy_subscribe channels).
+    #[arg(long = "proxy_subscribe_endpoint", default_value = "")]
+    pub proxy_subscribe_endpoint: String,
+    /// Publish-proxy endpoint URL (authorize/transform PUBLISH on proxy_publish channels).
+    #[arg(long = "proxy_publish_endpoint", default_value = "")]
+    pub proxy_publish_endpoint: String,
+    /// RPC-proxy endpoint URL (handle client RPC via HTTP callback).
+    #[arg(long = "proxy_rpc_endpoint", default_value = "")]
+    pub proxy_rpc_endpoint: String,
     /// Enable the admin endpoints.
     #[arg(long = "admin")]
     pub admin: bool,

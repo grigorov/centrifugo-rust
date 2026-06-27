@@ -11,8 +11,8 @@ use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
     ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, PingResult,
     PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, PublishRequest,
-    PublishResult, RefreshRequest, RefreshResult, SubRefreshRequest, SubRefreshResult,
-    SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    PublishResult, RefreshRequest, RefreshResult, RpcRequest, RpcResult, SubRefreshRequest,
+    SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{Command, Disconnect, Error, MethodType, ProtocolType, Raw, Reply};
 use serde::de::DeserializeOwned;
@@ -22,7 +22,9 @@ use uuid::Uuid;
 
 use crate::hub::{ClientHandle, ClientId, Out};
 use crate::node::Node;
-use crate::proxy::{ProxyConnectOutcome, ProxyConnectRequest};
+use crate::proxy::{
+    ProxyConnectOutcome, ProxyConnectRequest, ProxyOutcome, ProxyRequest, RefreshProxy,
+};
 
 /// Result of dispatching one command: replies to send, plus an optional
 /// disconnect that closes the connection (with a specific code + reason).
@@ -106,13 +108,33 @@ impl Client {
         self.subscriptions.contains_key(channel)
     }
 
+    /// Base proxy request carrying this connection's identity + transport.
+    fn proxy_request(&self) -> ProxyRequest {
+        ProxyRequest {
+            client: self.id.clone(),
+            user: self.user.clone(),
+            transport: "websocket".into(),
+            protocol: match self.proto {
+                ProtocolType::Json => "json".into(),
+                ProtocolType::Protobuf => "protobuf".into(),
+            },
+            ..Default::default()
+        }
+    }
+
     /// Build the ClientInfo for this connection (publisher/presence/join-leave).
     fn client_info(&self) -> ClientInfo {
+        self.client_info_with(None)
+    }
+
+    /// Like [`client_info`], with per-channel `chan_info` attached (from a
+    /// subscription token or the subscribe proxy).
+    fn client_info_with(&self, chan_info: Option<Vec<u8>>) -> ClientInfo {
         ClientInfo {
             user: self.user.clone(),
             client: self.id.clone(),
             conn_info: self.conn_info.as_ref().map(|b| Raw::from_bytes(b.clone())),
-            chan_info: None,
+            chan_info: chan_info.map(Raw::from_bytes),
         }
     }
 
@@ -128,19 +150,15 @@ impl Client {
             // returns its own outcome.
             MethodType::Connect => self.on_connect(cmd).await,
             MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd).await),
-            MethodType::Publish => CommandOutcome::replies(self.on_publish(cmd).await),
+            MethodType::Publish => self.on_publish(cmd).await,
             MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd).await),
             MethodType::Ping => {
                 CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PingResult {})])
             }
-            MethodType::Refresh => self.on_refresh(cmd),
+            MethodType::Refresh => self.on_refresh(cmd).await,
             // SEND is fire-and-forget: no reply.
             MethodType::Send => CommandOutcome::replies(vec![]),
-            // RPC with no registered handler -> method not found (matches
-            // centrifugo's OnRPC).
-            MethodType::Rpc => {
-                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())])
-            }
+            MethodType::Rpc => self.on_rpc(cmd).await,
             MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd).await),
             MethodType::PresenceStats => {
                 CommandOutcome::replies(self.on_presence_stats(cmd).await)
@@ -192,7 +210,7 @@ impl Client {
                     return CommandOutcome::disconnect(Disconnect::invalid_token());
                 }
             }
-        } else if let Some(proxy) = self.node.connect_proxy() {
+        } else if let Some(proxy) = self.node.proxies().connect.clone() {
             let preq = ProxyConnectRequest {
                 client: self.id.clone(),
                 transport: "websocket".into(),
@@ -327,7 +345,7 @@ impl Client {
         if req.channel.is_empty() {
             return vec![Reply::err(cmd.id, Error::bad_request())];
         }
-        let (presence, join_leave, history_recover, anonymous, server_side) =
+        let (presence, join_leave, history_recover, anonymous, server_side, proxy_subscribe) =
             match self.node.channel_options(&req.channel) {
                 Some(o) => (
                     o.presence,
@@ -335,6 +353,7 @@ impl Client {
                     o.history_recover,
                     o.anonymous,
                     o.server_side,
+                    o.proxy_subscribe,
                 ),
                 None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
             };
@@ -351,6 +370,10 @@ impl Client {
         if !user_allowed(&req.channel, &self.user) {
             return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
+        // Per-channel info (becomes ClientInfo.chan_info) + subscription expiry,
+        // established by the subscription token ($) or the subscribe proxy.
+        let mut chan_info: Option<Vec<u8>> = None;
+        let mut sub_expire_at: i64 = 0;
         // Private ($-prefixed) channels require a valid subscription token whose
         // client + channel match this connection.
         if self.node.is_private(&req.channel) {
@@ -362,6 +385,8 @@ impl Client {
                     if t.client != self.id || t.channel != req.channel {
                         return vec![Reply::err(cmd.id, Error::permission_denied())];
                     }
+                    chan_info = t.info;
+                    sub_expire_at = if t.expire_token_only { 0 } else { t.expire_at };
                 }
                 Err(VerifyError::Expired) => {
                     return vec![Reply::err(cmd.id, Error::token_expired())]
@@ -370,13 +395,34 @@ impl Client {
                     return vec![Reply::err(cmd.id, Error::permission_denied())]
                 }
             }
+        } else if proxy_subscribe && !is_user_limited(&req.channel) {
+            // Subscribe proxy authorizes (and may attach info to) the subscription.
+            let Some(proxy) = self.node.proxies().subscribe.clone() else {
+                return vec![Reply::err(cmd.id, Error::not_available())];
+            };
+            let mut preq = self.proxy_request();
+            preq.channel = req.channel.clone();
+            preq.token = req.token.clone();
+            match proxy.subscribe(preq).await {
+                Ok(ProxyOutcome::Result(c)) => chan_info = c.info,
+                Ok(ProxyOutcome::Error { code, message }) => {
+                    return vec![Reply::err(cmd.id, Error::new(code, message))]
+                }
+                // on_subscribe replies (cannot disconnect); a proxy disconnect is
+                // surfaced as a permission-denied reply.
+                Ok(ProxyOutcome::Disconnect { .. }) => {
+                    return vec![Reply::err(cmd.id, Error::permission_denied())]
+                }
+                Err(_) => return vec![Reply::err(cmd.id, Error::internal())],
+            }
         }
         self.node.hub().subscribe(&self.id, &req.channel);
         let _ = self.node.engine().subscribe(&req.channel).await;
 
+        let sub_info = self.client_info_with(chan_info.clone());
         if presence {
             self.node
-                .add_presence(&req.channel, &self.id, self.client_info())
+                .add_presence(&req.channel, &self.id, sub_info.clone())
                 .await;
         }
         self.subscriptions.insert(
@@ -385,6 +431,8 @@ impl Client {
                 presence,
                 join_leave,
                 recoverable: history_recover,
+                expire_at: sub_expire_at,
+                chan_info,
                 ..Default::default()
             },
         );
@@ -435,9 +483,7 @@ impl Client {
         // Join is published after the subscribe reply; the joiner is now a
         // subscriber (matches centrifuge ordering).
         if join_leave {
-            self.node
-                .publish_join(&req.channel, self.client_info())
-                .await;
+            self.node.publish_join(&req.channel, sub_info).await;
         }
         vec![reply]
     }
@@ -469,20 +515,59 @@ impl Client {
         vec![ok_reply(self.proto, cmd.id, &result)]
     }
 
-    async fn on_publish(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_publish(&mut self, cmd: &Command) -> CommandOutcome {
         let req: PublishRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
         if req.channel.is_empty() {
-            return vec![Reply::err(cmd.id, Error::bad_request())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
         }
-        let data = req.data.as_ref().map(|r| r.as_bytes()).unwrap_or(b"null");
+        let mut data: Vec<u8> = req
+            .data
+            .as_ref()
+            .map(|r| r.as_bytes().to_vec())
+            .unwrap_or_else(|| b"null".to_vec());
+
+        // Publish proxy (per-channel `proxy_publish`): the endpoint may deny
+        // (error/disconnect) or transform the payload before it is published.
+        let proxy_publish = self
+            .node
+            .channel_options(&req.channel)
+            .map(|o| o.proxy_publish)
+            .unwrap_or(false);
+        if proxy_publish {
+            if let Some(proxy) = self.node.proxies().publish.clone() {
+                let mut preq = self.proxy_request();
+                preq.channel = req.channel.clone();
+                preq.data = Some(data.clone());
+                match proxy.publish(preq).await {
+                    Ok(ProxyOutcome::Result(d)) => {
+                        if let Some(nd) = d.data {
+                            data = nd;
+                        }
+                    }
+                    Ok(ProxyOutcome::Error { code, message }) => {
+                        return CommandOutcome::replies(vec![Reply::err(
+                            cmd.id,
+                            Error::new(code, message),
+                        )]);
+                    }
+                    Ok(ProxyOutcome::Disconnect { code, reason }) => {
+                        return CommandOutcome::disconnect(Disconnect::new(code, reason, false));
+                    }
+                    Err(_) => {
+                        return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]);
+                    }
+                }
+            }
+        }
+
         // A client-initiated publication carries the publisher's ClientInfo,
         // matching Go centrifuge behavior.
         let info = self.client_info();
-        self.node.publish(&req.channel, data, Some(info)).await;
-        vec![ok_reply(self.proto, cmd.id, &PublishResult {})]
+        self.node.publish(&req.channel, &data, Some(info)).await;
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PublishResult {})])
     }
 
     async fn on_unsubscribe(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -585,11 +670,16 @@ impl Client {
         self.node.remove(&self.id);
     }
 
-    fn on_refresh(&mut self, cmd: &Command) -> CommandOutcome {
+    async fn on_refresh(&mut self, cmd: &Command) -> CommandOutcome {
         let req: RefreshRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
             Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
+        // With a refresh proxy configured, refresh via the HTTP callback instead
+        // of a JWT.
+        if let Some(proxy) = self.node.proxies().refresh.clone() {
+            return self.refresh_via_proxy(cmd.id, proxy.as_ref()).await;
+        }
         // Go (centrifuge handleRefresh): an empty refresh token is rejected with
         // DisconnectBadRequest (3003) before any verification.
         if req.token.is_empty() {
@@ -631,6 +721,76 @@ impl Client {
             Err(VerifyError::Expired) => CommandOutcome::disconnect(Disconnect::expired()),
             // Invalid refresh token -> close (3002).
             Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
+        }
+    }
+
+    /// Connection refresh via the refresh proxy: expired -> DisconnectExpired,
+    /// else update expiry/info and reply (110 if the new expiry is already past).
+    async fn refresh_via_proxy(&mut self, id: u32, proxy: &dyn RefreshProxy) -> CommandOutcome {
+        match proxy.refresh(self.proxy_request()).await {
+            Ok(ProxyOutcome::Result(c)) => {
+                if c.expired {
+                    return CommandOutcome::disconnect(Disconnect::expired());
+                }
+                if c.info.is_some() {
+                    self.conn_info = c.info;
+                }
+                self.expire_at = c.expire_at;
+                let (expires, ttl) = if c.expire_at > 0 {
+                    let ttl = c.expire_at - now_unix();
+                    if ttl <= 0 {
+                        return CommandOutcome::replies(vec![Reply::err(id, Error::expired())]);
+                    }
+                    (true, ttl as u32)
+                } else {
+                    (false, 0)
+                };
+                let result = RefreshResult {
+                    client: self.id.clone(),
+                    version: String::new(),
+                    expires,
+                    ttl,
+                };
+                CommandOutcome::replies(vec![ok_reply(self.proto, id, &result)])
+            }
+            Ok(ProxyOutcome::Error { code, message }) => {
+                CommandOutcome::replies(vec![Reply::err(id, Error::new(code, message))])
+            }
+            Ok(ProxyOutcome::Disconnect { code, reason }) => {
+                CommandOutcome::disconnect(Disconnect::new(code, reason, false))
+            }
+            Err(_) => CommandOutcome::replies(vec![Reply::err(id, Error::internal())]),
+        }
+    }
+
+    /// RPC: with an RPC proxy configured, forward the call and relay its result/
+    /// error/disconnect; without one, RPC is method-not-found (matching Go's
+    /// behavior when no rpc handler is registered).
+    async fn on_rpc(&mut self, cmd: &Command) -> CommandOutcome {
+        let Some(proxy) = self.node.proxies().rpc.clone() else {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())]);
+        };
+        let req: RpcRequest = match parse_params(self.proto, &cmd.params) {
+            Ok(r) => r,
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+        };
+        let mut preq = self.proxy_request();
+        preq.method = req.method;
+        preq.data = req.data.map(|r| r.as_bytes().to_vec());
+        match proxy.rpc(preq).await {
+            Ok(ProxyOutcome::Result(d)) => {
+                let result = RpcResult {
+                    data: Some(Raw::from_bytes(d.data)),
+                };
+                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
+            }
+            Ok(ProxyOutcome::Error { code, message }) => {
+                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::new(code, message))])
+            }
+            Ok(ProxyOutcome::Disconnect { code, reason }) => {
+                CommandOutcome::disconnect(Disconnect::new(code, reason, false))
+            }
+            Err(_) => CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]),
         }
     }
 
@@ -710,6 +870,12 @@ fn user_allowed(channel: &str, user: &str) -> bool {
         None => true,
         Some((_, allowed)) => allowed.split(',').any(|u| u == user),
     }
+}
+
+/// Whether `channel` is user-limited (contains the `#` boundary). The subscribe
+/// proxy is skipped for these (they are allow-list based), matching Go.
+fn is_user_limited(channel: &str) -> bool {
+    channel.contains('#')
 }
 
 /// Parse a typed request from optional params, decoding in the connection's

@@ -30,6 +30,10 @@ pub struct Settings {
     pub engine: String,
     pub redis_address: String,
     pub proxy_connect_endpoint: String,
+    pub proxy_refresh_endpoint: String,
+    pub proxy_subscribe_endpoint: String,
+    pub proxy_publish_endpoint: String,
+    pub proxy_rpc_endpoint: String,
     pub admin: bool,
     pub admin_password: String,
     pub admin_secret: String,
@@ -115,6 +119,10 @@ impl Settings {
             engine: a.engine.clone(),
             redis_address: a.redis_address.clone(),
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
+            proxy_refresh_endpoint: a.proxy_refresh_endpoint.clone(),
+            proxy_subscribe_endpoint: a.proxy_subscribe_endpoint.clone(),
+            proxy_publish_endpoint: a.proxy_publish_endpoint.clone(),
+            proxy_rpc_endpoint: a.proxy_rpc_endpoint.clone(),
             admin: a.admin,
             admin_password: a.admin_password.clone(),
             admin_secret: a.admin_secret.clone(),
@@ -128,6 +136,8 @@ impl Settings {
                     history_recover: a.history_recover,
                     anonymous: false,
                     server_side: false,
+                    proxy_subscribe: false,
+                    proxy_publish: false,
                 },
                 namespaces: HashMap::new(),
                 namespace_boundary: ":".into(),
@@ -164,6 +174,10 @@ impl Settings {
             engine: fc.engine,
             redis_address: fc.redis_address,
             proxy_connect_endpoint: fc.proxy_connect_endpoint,
+            proxy_refresh_endpoint: fc.proxy_refresh_endpoint,
+            proxy_subscribe_endpoint: fc.proxy_subscribe_endpoint,
+            proxy_publish_endpoint: fc.proxy_publish_endpoint,
+            proxy_rpc_endpoint: fc.proxy_rpc_endpoint,
             admin: fc.admin,
             admin_password: fc.admin_password,
             admin_secret: fc.admin_secret,
@@ -202,6 +216,10 @@ struct ChannelOptionsCfg {
     anonymous: bool,
     #[serde(default)]
     server_side: bool,
+    #[serde(default)]
+    proxy_subscribe: bool,
+    #[serde(default)]
+    proxy_publish: bool,
 }
 
 impl From<ChannelOptionsCfg> for ChannelOptions {
@@ -215,6 +233,8 @@ impl From<ChannelOptionsCfg> for ChannelOptions {
             history_recover: c.history_recover,
             anonymous: c.anonymous,
             server_side: c.server_side,
+            proxy_subscribe: c.proxy_subscribe,
+            proxy_publish: c.proxy_publish,
         }
     }
 }
@@ -282,6 +302,14 @@ struct FileConfig {
     redis_address: String,
     #[serde(default)]
     proxy_connect_endpoint: String,
+    #[serde(default)]
+    proxy_refresh_endpoint: String,
+    #[serde(default)]
+    proxy_subscribe_endpoint: String,
+    #[serde(default)]
+    proxy_publish_endpoint: String,
+    #[serde(default)]
+    proxy_rpc_endpoint: String,
     #[serde(default)]
     admin: bool,
     #[serde(default)]

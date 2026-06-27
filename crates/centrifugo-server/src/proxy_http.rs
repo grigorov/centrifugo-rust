@@ -1,41 +1,81 @@
-//! HTTP implementation of the connect-proxy. POSTs a JSON request to the
-//! configured endpoint and reads `{result:{user,expire_at,info|b64info}}`,
-//! mirroring centrifugo v2.8.6's HTTP proxy contract. An `error`/`disconnect`
-//! response, a non-2xx status, or a transport failure rejects the connection.
+//! HTTP implementations of the event proxies (connect/refresh/subscribe/publish/
+//! rpc), mirroring centrifugo v2.8.6's HTTP proxy contract. Each POSTs a JSON
+//! request and reads a `{result|error|disconnect}` reply; an `error`/`disconnect`
+//! relays that outcome, a non-2xx status or transport failure is `Err` (treated
+//! as ErrorInternal by the caller).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use centrifugo_core::{ConnectProxy, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest};
+use centrifugo_core::{
+    ConnectProxy, Proxies, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest,
+    ProxyOutcome, ProxyRequest, PublishData, PublishProxy, RefreshCreds, RefreshProxy, RpcData,
+    RpcProxy, SubscribeCreds, SubscribeProxy,
+};
 use serde::Deserialize;
-use serde_json::value::RawValue;
+use serde_json::{value::RawValue, Map, Value};
+
+use crate::config::Settings;
 
 const TIMEOUT: Duration = Duration::from_secs(1);
 
-pub struct HttpConnectProxy {
-    endpoint: String,
-    client: reqwest::Client,
-}
-
-impl HttpConnectProxy {
-    pub fn new(endpoint: String) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(TIMEOUT)
-            .build()
-            .unwrap_or_default();
-        HttpConnectProxy { endpoint, client }
+/// Build all configured proxies from settings (a proxy is enabled iff its
+/// endpoint is non-empty).
+pub fn build_proxies(s: &Settings) -> Proxies {
+    let p = |ep: &str| (!ep.is_empty()).then(|| ep.to_string());
+    Proxies {
+        connect: p(&s.proxy_connect_endpoint)
+            .map(|e| Arc::new(HttpConnectProxy::new(e)) as Arc<dyn ConnectProxy>),
+        refresh: p(&s.proxy_refresh_endpoint)
+            .map(|e| Arc::new(HttpRefreshProxy::new(e)) as Arc<dyn RefreshProxy>),
+        subscribe: p(&s.proxy_subscribe_endpoint)
+            .map(|e| Arc::new(HttpSubscribeProxy::new(e)) as Arc<dyn SubscribeProxy>),
+        publish: p(&s.proxy_publish_endpoint)
+            .map(|e| Arc::new(HttpPublishProxy::new(e)) as Arc<dyn PublishProxy>),
+        rpc: p(&s.proxy_rpc_endpoint)
+            .map(|e| Arc::new(HttpRpcProxy::new(e)) as Arc<dyn RpcProxy>),
     }
 }
 
-#[derive(Deserialize)]
-struct ProxyResponse {
-    #[serde(default)]
-    result: Option<ConnectResult>,
-    #[serde(default)]
-    error: Option<ProxyError>,
-    #[serde(default)]
-    disconnect: Option<ProxyDisconnect>,
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
+fn encoding(protocol: &str) -> &'static str {
+    if protocol == "protobuf" {
+        "binary"
+    } else {
+        "json"
+    }
+}
+
+/// info/data bytes from a `field` (raw JSON) or its base64 `b64field` sibling.
+fn decode_bytes(raw: Option<Box<RawValue>>, b64: Option<String>) -> Option<Vec<u8>> {
+    match b64 {
+        Some(ref b) if !b.is_empty() => base64::engine::general_purpose::STANDARD.decode(b).ok(),
+        _ => raw.map(|r| r.get().as_bytes().to_vec()),
+    }
+}
+
+/// Insert a publish/rpc `data` payload into the request body: raw JSON for JSON
+/// clients, base64 `b64data` for protobuf (or non-JSON bytes).
+fn put_data(map: &mut Map<String, Value>, data: &Option<Vec<u8>>, protocol: &str) {
+    let Some(d) = data else { return };
+    if protocol != "protobuf" {
+        if let Ok(v) = serde_json::from_slice::<Value>(d) {
+            map.insert("data".into(), v);
+            return;
+        }
+    }
+    map.insert(
+        "b64data".into(),
+        Value::String(base64::engine::general_purpose::STANDARD.encode(d)),
+    );
 }
 
 #[derive(Deserialize, Default)]
@@ -54,6 +94,30 @@ struct ProxyDisconnect {
     reason: String,
 }
 
+// ---- Connect ----
+
+pub struct HttpConnectProxy {
+    endpoint: String,
+    client: reqwest::Client,
+}
+impl HttpConnectProxy {
+    pub fn new(endpoint: String) -> Self {
+        HttpConnectProxy {
+            endpoint,
+            client: http_client(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ConnectResponse {
+    #[serde(default)]
+    result: Option<ConnectResult>,
+    #[serde(default)]
+    error: Option<ProxyError>,
+    #[serde(default)]
+    disconnect: Option<ProxyDisconnect>,
+}
 #[derive(Deserialize, Default)]
 struct ConnectResult {
     #[serde(default)]
@@ -73,9 +137,9 @@ impl ConnectProxy for HttpConnectProxy {
             "client": req.client,
             "transport": req.transport,
             "protocol": req.protocol,
-            "encoding": if req.protocol == "protobuf" { "binary" } else { "json" },
+            "encoding": encoding(&req.protocol),
         });
-        let resp: ProxyResponse = self
+        let resp: ConnectResponse = self
             .client
             .post(&self.endpoint)
             .json(&body)
@@ -84,8 +148,6 @@ impl ConnectProxy for HttpConnectProxy {
             .error_for_status()?
             .json()
             .await?;
-        // Precedence matches Go's connect_handler: disconnect, then error, then
-        // result; absent all three -> no credentials (fall through to anon/insecure).
         if let Some(d) = resp.disconnect {
             return Ok(ProxyConnectOutcome::Disconnect {
                 code: d.code,
@@ -101,17 +163,280 @@ impl ConnectProxy for HttpConnectProxy {
         let Some(result) = resp.result else {
             return Ok(ProxyConnectOutcome::NoCredentials);
         };
-        // b64info (base64) overrides inline info, matching the token semantics.
-        let info = match result.b64info {
-            Some(ref b) if !b.is_empty() => {
-                Some(base64::engine::general_purpose::STANDARD.decode(b)?)
-            }
-            _ => result.info.map(|r| r.get().as_bytes().to_vec()),
-        };
         Ok(ProxyConnectOutcome::Credentials(ProxyConnectReply {
             user: result.user,
-            info,
+            info: decode_bytes(result.info, result.b64info),
             expire_at: result.expire_at,
+        }))
+    }
+}
+
+// ---- Refresh ----
+
+pub struct HttpRefreshProxy {
+    endpoint: String,
+    client: reqwest::Client,
+}
+impl HttpRefreshProxy {
+    pub fn new(endpoint: String) -> Self {
+        HttpRefreshProxy {
+            endpoint,
+            client: http_client(),
+        }
+    }
+}
+#[derive(Deserialize)]
+struct RefreshResponse {
+    #[serde(default)]
+    result: Option<RefreshResult>,
+    #[serde(default)]
+    error: Option<ProxyError>,
+    #[serde(default)]
+    disconnect: Option<ProxyDisconnect>,
+}
+#[derive(Deserialize, Default)]
+struct RefreshResult {
+    #[serde(default)]
+    expired: bool,
+    #[serde(default)]
+    expire_at: i64,
+    #[serde(default)]
+    info: Option<Box<RawValue>>,
+    #[serde(default)]
+    b64info: Option<String>,
+}
+
+#[async_trait]
+impl RefreshProxy for HttpRefreshProxy {
+    async fn refresh(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RefreshCreds>> {
+        let body = serde_json::json!({
+            "client": req.client,
+            "user": req.user,
+            "transport": req.transport,
+            "protocol": req.protocol,
+            "encoding": encoding(&req.protocol),
+        });
+        let resp: RefreshResponse = self
+            .client
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if let Some(d) = resp.disconnect {
+            return Ok(ProxyOutcome::Disconnect {
+                code: d.code,
+                reason: d.reason,
+            });
+        }
+        if let Some(e) = resp.error {
+            return Ok(ProxyOutcome::Error {
+                code: e.code,
+                message: e.message,
+            });
+        }
+        let r = resp.result.unwrap_or_default();
+        Ok(ProxyOutcome::Result(RefreshCreds {
+            expired: r.expired,
+            expire_at: r.expire_at,
+            info: decode_bytes(r.info, r.b64info),
+        }))
+    }
+}
+
+// ---- Subscribe ----
+
+pub struct HttpSubscribeProxy {
+    endpoint: String,
+    client: reqwest::Client,
+}
+impl HttpSubscribeProxy {
+    pub fn new(endpoint: String) -> Self {
+        HttpSubscribeProxy {
+            endpoint,
+            client: http_client(),
+        }
+    }
+}
+#[derive(Deserialize)]
+struct SubscribeResponse {
+    #[serde(default)]
+    result: Option<SubscribeResult>,
+    #[serde(default)]
+    error: Option<ProxyError>,
+    #[serde(default)]
+    disconnect: Option<ProxyDisconnect>,
+}
+#[derive(Deserialize, Default)]
+struct SubscribeResult {
+    #[serde(default)]
+    info: Option<Box<RawValue>>,
+    #[serde(default)]
+    b64info: Option<String>,
+}
+
+#[async_trait]
+impl SubscribeProxy for HttpSubscribeProxy {
+    async fn subscribe(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<SubscribeCreds>> {
+        let body = serde_json::json!({
+            "client": req.client,
+            "user": req.user,
+            "channel": req.channel,
+            "token": req.token,
+            "transport": req.transport,
+            "protocol": req.protocol,
+            "encoding": encoding(&req.protocol),
+        });
+        let resp: SubscribeResponse = self
+            .client
+            .post(&self.endpoint)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if let Some(d) = resp.disconnect {
+            return Ok(ProxyOutcome::Disconnect {
+                code: d.code,
+                reason: d.reason,
+            });
+        }
+        if let Some(e) = resp.error {
+            return Ok(ProxyOutcome::Error {
+                code: e.code,
+                message: e.message,
+            });
+        }
+        let r = resp.result.unwrap_or_default();
+        Ok(ProxyOutcome::Result(SubscribeCreds {
+            info: decode_bytes(r.info, r.b64info),
+        }))
+    }
+}
+
+// ---- Publish ----
+
+pub struct HttpPublishProxy {
+    endpoint: String,
+    client: reqwest::Client,
+}
+impl HttpPublishProxy {
+    pub fn new(endpoint: String) -> Self {
+        HttpPublishProxy {
+            endpoint,
+            client: http_client(),
+        }
+    }
+}
+#[derive(Deserialize)]
+struct PublishResponse {
+    #[serde(default)]
+    result: Option<DataResult>,
+    #[serde(default)]
+    error: Option<ProxyError>,
+    #[serde(default)]
+    disconnect: Option<ProxyDisconnect>,
+}
+#[derive(Deserialize, Default)]
+struct DataResult {
+    #[serde(default)]
+    data: Option<Box<RawValue>>,
+    #[serde(default)]
+    b64data: Option<String>,
+}
+
+#[async_trait]
+impl PublishProxy for HttpPublishProxy {
+    async fn publish(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<PublishData>> {
+        let mut map = Map::new();
+        map.insert("client".into(), req.client.clone().into());
+        map.insert("user".into(), req.user.clone().into());
+        map.insert("channel".into(), req.channel.clone().into());
+        map.insert("transport".into(), req.transport.clone().into());
+        map.insert("protocol".into(), req.protocol.clone().into());
+        map.insert("encoding".into(), encoding(&req.protocol).into());
+        put_data(&mut map, &req.data, &req.protocol);
+        let resp: PublishResponse = self
+            .client
+            .post(&self.endpoint)
+            .json(&Value::Object(map))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if let Some(d) = resp.disconnect {
+            return Ok(ProxyOutcome::Disconnect {
+                code: d.code,
+                reason: d.reason,
+            });
+        }
+        if let Some(e) = resp.error {
+            return Ok(ProxyOutcome::Error {
+                code: e.code,
+                message: e.message,
+            });
+        }
+        let r = resp.result.unwrap_or_default();
+        Ok(ProxyOutcome::Result(PublishData {
+            data: decode_bytes(r.data, r.b64data),
+        }))
+    }
+}
+
+// ---- RPC ----
+
+pub struct HttpRpcProxy {
+    endpoint: String,
+    client: reqwest::Client,
+}
+impl HttpRpcProxy {
+    pub fn new(endpoint: String) -> Self {
+        HttpRpcProxy {
+            endpoint,
+            client: http_client(),
+        }
+    }
+}
+
+#[async_trait]
+impl RpcProxy for HttpRpcProxy {
+    async fn rpc(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RpcData>> {
+        let mut map = Map::new();
+        map.insert("client".into(), req.client.clone().into());
+        map.insert("user".into(), req.user.clone().into());
+        map.insert("method".into(), req.method.clone().into());
+        map.insert("transport".into(), req.transport.clone().into());
+        map.insert("protocol".into(), req.protocol.clone().into());
+        map.insert("encoding".into(), encoding(&req.protocol).into());
+        put_data(&mut map, &req.data, &req.protocol);
+        let resp: PublishResponse = self
+            .client
+            .post(&self.endpoint)
+            .json(&Value::Object(map))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        if let Some(d) = resp.disconnect {
+            return Ok(ProxyOutcome::Disconnect {
+                code: d.code,
+                reason: d.reason,
+            });
+        }
+        if let Some(e) = resp.error {
+            return Ok(ProxyOutcome::Error {
+                code: e.code,
+                message: e.message,
+            });
+        }
+        let r = resp.result.unwrap_or_default();
+        Ok(ProxyOutcome::Result(RpcData {
+            data: decode_bytes(r.data, r.b64data).unwrap_or_default(),
         }))
     }
 }

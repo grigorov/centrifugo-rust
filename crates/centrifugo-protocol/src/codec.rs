@@ -9,8 +9,9 @@ use crate::command::encode_raw;
 use crate::messages::{
     ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, Join, Leave, PingResult,
     PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, Publication,
-    PublishRequest, PublishResult, RefreshRequest, RefreshResult, SubRefreshRequest,
-    SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    PublishRequest, PublishResult, RefreshRequest, RefreshResult, RpcRequest, RpcResult,
+    SubRefreshRequest, SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest,
+    UnsubscribeResult,
 };
 use crate::raw::Raw;
 use crate::{json, pb, Command, MethodType, Push, Reply};
@@ -203,6 +204,8 @@ wire!(RefreshRequest, pb::RefreshRequest);
 wire!(RefreshResult, pb::RefreshResult);
 wire!(SubRefreshRequest, pb::SubRefreshRequest);
 wire!(SubRefreshResult, pb::SubRefreshResult);
+wire!(RpcRequest, pb::RpcRequest);
+wire!(RpcResult, pb::RpcResult);
 wire!(PresenceRequest, pb::PresenceRequest);
 wire!(PresenceResult, pb::PresenceResult);
 wire!(PresenceStatsRequest, pb::PresenceStatsRequest);

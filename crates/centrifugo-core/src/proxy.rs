@@ -1,7 +1,9 @@
-//! Connect-proxy abstraction. When configured, a client CONNECT is authenticated
-//! by calling out to an external HTTP endpoint instead of (or in addition to) a
-//! JWT. The transport (HTTP) lives in the server crate; core only defines the
-//! trait + request/reply types so it stays dependency-free.
+//! Proxy abstractions. When configured, client events (connect, refresh,
+//! subscribe, publish, rpc) are proxied to external HTTP endpoints. The
+//! transport (HTTP) lives in the server crate; core only defines the traits +
+//! request/reply types so it stays dependency-free.
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -46,4 +48,86 @@ pub enum ProxyConnectOutcome {
 #[async_trait]
 pub trait ConnectProxy: Send + Sync {
     async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectOutcome>;
+}
+
+/// Common fields sent to refresh/subscribe/publish/rpc proxy endpoints. Only the
+/// relevant fields are serialized per endpoint by the HTTP impl.
+#[derive(Default)]
+pub struct ProxyRequest {
+    pub client: String,
+    pub user: String,
+    pub transport: String,
+    pub protocol: String,
+    /// Subscribe/publish channel.
+    pub channel: String,
+    /// RPC method.
+    pub method: String,
+    /// Publish/RPC data.
+    pub data: Option<Vec<u8>>,
+    /// Subscribe token (for token-protected channels).
+    pub token: String,
+}
+
+/// A proxy decision: grant a typed result, relay an error code, or force a
+/// disconnect (mirrors the `{result|error|disconnect}` proxy reply shape).
+pub enum ProxyOutcome<T> {
+    Result(T),
+    Error { code: u32, message: String },
+    Disconnect { code: u32, reason: String },
+}
+
+/// Refresh-proxy credentials.
+#[derive(Default)]
+pub struct RefreshCreds {
+    pub expired: bool,
+    pub expire_at: i64,
+    pub info: Option<Vec<u8>>,
+}
+
+/// Subscribe-proxy grant (per-subscription info).
+#[derive(Default)]
+pub struct SubscribeCreds {
+    pub info: Option<Vec<u8>>,
+}
+
+/// Publish-proxy result; `data == None` means publish the original payload.
+#[derive(Default)]
+pub struct PublishData {
+    pub data: Option<Vec<u8>>,
+}
+
+/// RPC-proxy result data.
+#[derive(Default)]
+pub struct RpcData {
+    pub data: Vec<u8>,
+}
+
+#[async_trait]
+pub trait RefreshProxy: Send + Sync {
+    async fn refresh(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RefreshCreds>>;
+}
+
+#[async_trait]
+pub trait SubscribeProxy: Send + Sync {
+    async fn subscribe(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<SubscribeCreds>>;
+}
+
+#[async_trait]
+pub trait PublishProxy: Send + Sync {
+    async fn publish(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<PublishData>>;
+}
+
+#[async_trait]
+pub trait RpcProxy: Send + Sync {
+    async fn rpc(&self, req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RpcData>>;
+}
+
+/// All configured proxies, held by the `Node`. Default = none.
+#[derive(Default, Clone)]
+pub struct Proxies {
+    pub connect: Option<Arc<dyn ConnectProxy>>,
+    pub refresh: Option<Arc<dyn RefreshProxy>>,
+    pub subscribe: Option<Arc<dyn SubscribeProxy>>,
+    pub publish: Option<Arc<dyn PublishProxy>>,
+    pub rpc: Option<Arc<dyn RpcProxy>>,
 }

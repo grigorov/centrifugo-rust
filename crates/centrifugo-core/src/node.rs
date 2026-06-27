@@ -22,7 +22,7 @@ use crate::client::Client;
 use crate::engine::{Engine, NodeMessage, PublishOptions, RouteFn};
 use crate::hub::{Hub, Out};
 use crate::memory::MemoryEngine;
-use crate::proxy::ConnectProxy;
+use crate::proxy::Proxies;
 
 /// Channel options. Resolved per-channel from the namespace registry.
 #[derive(Debug, Clone, Default)]
@@ -40,6 +40,10 @@ pub struct ChannelOptions {
     pub anonymous: bool,
     /// Server-side-only channel: clients may not subscribe directly.
     pub server_side: bool,
+    /// Proxy SUBSCRIBE on this channel to the subscribe-proxy endpoint.
+    pub proxy_subscribe: bool,
+    /// Proxy PUBLISH on this channel to the publish-proxy endpoint.
+    pub proxy_publish: bool,
 }
 
 impl ChannelOptions {
@@ -133,9 +137,8 @@ pub struct Node {
     /// `anonymous` subscribe option).
     client_anonymous: bool,
     namespaces: Namespaces,
-    /// Optional connect-proxy: when set, CONNECT is authenticated via this
-    /// callback rather than a JWT.
-    connect_proxy: Option<Arc<dyn ConnectProxy>>,
+    /// Configured event proxies (connect/refresh/subscribe/publish/rpc).
+    proxies: Proxies,
     /// How often a connection re-asserts its presence (Go
     /// `client_presence_ping_interval`).
     presence_ping_interval: Duration,
@@ -159,7 +162,7 @@ impl Node {
         client_insecure: bool,
         client_anonymous: bool,
         namespaces: Namespaces,
-        connect_proxy: Option<Arc<dyn ConnectProxy>>,
+        proxies: Proxies,
         presence_ping_secs: u64,
         presence_expire_secs: u64,
     ) -> Arc<Self> {
@@ -170,7 +173,7 @@ impl Node {
             client_insecure,
             client_anonymous,
             namespaces,
-            connect_proxy,
+            proxies,
             presence_ping_interval: Duration::from_secs(presence_ping_secs),
             presence_expire_ms: presence_expire_secs * 1000,
             use_seq_gen: true,
@@ -186,7 +189,17 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
-        Self::new_with_engine(hub, engine, verifier, client_insecure, false, namespaces, None, 25, 60)
+        Self::new_with_engine(
+            hub,
+            engine,
+            verifier,
+            client_insecure,
+            false,
+            namespaces,
+            Proxies::default(),
+            25,
+            60,
+        )
     }
 
     /// Build an insecure single-node memory node (no token, no presence). Used
@@ -219,9 +232,9 @@ impl Node {
         self.client_anonymous
     }
 
-    /// The connect-proxy, if configured.
-    pub fn connect_proxy(&self) -> Option<&Arc<dyn ConnectProxy>> {
-        self.connect_proxy.as_ref()
+    /// The configured event proxies.
+    pub fn proxies(&self) -> &Proxies {
+        &self.proxies
     }
 
     /// Channel options for `channel`, or `None` if it names an unknown namespace.
