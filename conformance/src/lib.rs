@@ -179,6 +179,11 @@ impl Drop for Server {
 }
 
 fn bin_path() -> std::path::PathBuf {
+    // Override (e.g. the perf benchmark points at a release build for a fair
+    // comparison vs the optimized Go oracle).
+    if let Ok(p) = std::env::var("CENTRIFUGO_TEST_BIN") {
+        return std::path::PathBuf::from(p);
+    }
     let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // repo root
     p.push("target");
