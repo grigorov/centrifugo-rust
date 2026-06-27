@@ -58,7 +58,10 @@ async fn api_disconnect_closes_user_connection() {
     assert!(r["error"].is_null(), "api disconnect: {r}");
 
     let (code, _) = c.next_close().await;
-    assert_eq!(code, 3012, "force disconnect code (DisconnectForceNoReconnect)");
+    assert_eq!(
+        code, 3012,
+        "force disconnect code (DisconnectForceNoReconnect)"
+    );
 }
 
 #[tokio::test]
@@ -84,5 +87,8 @@ async fn api_unsubscribe_disconnect_validation() {
         r#"{"method":"unsubscribe","params":{"user":"u","channel":"nope:x"}}"#,
     )
     .await;
-    assert_eq!(r["error"]["code"], 102, "unsubscribe unknown namespace: {r}");
+    assert_eq!(
+        r["error"]["code"], 102,
+        "unsubscribe unknown namespace: {r}"
+    );
 }

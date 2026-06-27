@@ -31,7 +31,11 @@ async fn redis_presence_expires_without_refresh() {
     let mut ws = WsJsonClient::connect(&s.ws_url()).await;
     ws.connect_command().await;
     ws.subscribe(2, "room").await;
-    assert_eq!(num_clients(&s.http).await, 1, "present right after subscribe");
+    assert_eq!(
+        num_clients(&s.http).await,
+        1,
+        "present right after subscribe"
+    );
 
     // Past the expire window with no refresh -> pruned on read.
     tokio::time::sleep(std::time::Duration::from_millis(1400)).await;

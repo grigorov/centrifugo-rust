@@ -215,9 +215,7 @@ impl Client {
             MethodType::Send => CommandOutcome::replies(vec![]),
             MethodType::Rpc => self.on_rpc(cmd).await,
             MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd).await),
-            MethodType::PresenceStats => {
-                CommandOutcome::replies(self.on_presence_stats(cmd).await)
-            }
+            MethodType::PresenceStats => CommandOutcome::replies(self.on_presence_stats(cmd).await),
             MethodType::History => CommandOutcome::replies(self.on_history(cmd).await),
             MethodType::SubRefresh => self.on_sub_refresh(cmd),
         }
@@ -283,7 +281,10 @@ impl Client {
                 }
                 // Explicit proxy error -> relay that code/message as an error reply.
                 Ok(ProxyConnectOutcome::Error { code, message }) => {
-                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::new(code, message))]);
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::new(code, message),
+                    )]);
                 }
                 // Explicit proxy disconnect -> close with that code/reason.
                 Ok(ProxyConnectOutcome::Disconnect { code, reason }) => {
@@ -292,7 +293,9 @@ impl Client {
                 // No credentials -> fall through to anonymous/insecure handling.
                 Ok(ProxyConnectOutcome::NoCredentials) => None,
                 // Transport failure -> ErrorInternal (100) reply, matching Go.
-                Err(_) => return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]),
+                Err(_) => {
+                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())])
+                }
             }
         } else {
             None
@@ -417,10 +420,7 @@ impl Client {
         // Already subscribed -> ErrorAlreadySubscribed (105), checked before the
         // namespace/permission logic (matches Go's validateSubscribeRequest order).
         if self.is_subscribed(&req.channel) {
-            return CommandOutcome::replies(vec![Reply::err(
-                cmd.id,
-                Error::already_subscribed(),
-            )]);
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::already_subscribed())]);
         }
         let (presence, join_leave, history_recover, anonymous, server_side, proxy_subscribe) =
             match self.node.channel_options(&req.channel) {
@@ -460,7 +460,10 @@ impl Client {
         // client + channel match this connection.
         if self.node.is_private(&req.channel) {
             if req.token.is_empty() {
-                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
+                return CommandOutcome::replies(vec![Reply::err(
+                    cmd.id,
+                    Error::permission_denied(),
+                )]);
             }
             match self.node.verifier().verify_subscribe_token(&req.token) {
                 Ok(t) => {
@@ -474,7 +477,10 @@ impl Client {
                     sub_expire_at = if t.expire_token_only { 0 } else { t.expire_at };
                 }
                 Err(VerifyError::Expired) => {
-                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::token_expired())])
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::token_expired(),
+                    )])
                 }
                 Err(VerifyError::Invalid) => {
                     return CommandOutcome::replies(vec![Reply::err(
@@ -626,16 +632,15 @@ impl Client {
         // Channel options + publish permission (Go OnPublish): unknown namespace
         // -> UnknownChannel(102); !publish && !insecure -> PermissionDenied(103);
         // subscribe_to_publish requires an active subscription.
-        let (can_publish, subscribe_to_publish, proxy_publish) =
-            match self.node.channel_options(&req.channel) {
-                Some(o) => (o.publish, o.subscribe_to_publish, o.proxy_publish),
-                None => {
-                    return CommandOutcome::replies(vec![Reply::err(
-                        cmd.id,
-                        Error::unknown_channel(),
-                    )])
-                }
-            };
+        let (can_publish, subscribe_to_publish, proxy_publish) = match self
+            .node
+            .channel_options(&req.channel)
+        {
+            Some(o) => (o.publish, o.subscribe_to_publish, o.proxy_publish),
+            None => {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())])
+            }
+        };
         if !can_publish && !self.node.client_insecure() {
             return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
@@ -976,10 +981,12 @@ impl Client {
             }
             Some(_) => {}
             // Must be subscribed to refresh.
-            None => return CommandOutcome::replies(vec![Reply::err(
-                cmd.id,
-                Error::permission_denied(),
-            )]),
+            None => {
+                return CommandOutcome::replies(vec![Reply::err(
+                    cmd.id,
+                    Error::permission_denied(),
+                )])
+            }
         }
         // Go handleSubRefresh: an empty token is ErrorBadRequest (107) — an in-band
         // error reply, NOT a disconnect.
@@ -1111,7 +1118,10 @@ mod tests {
 
         // Within the grace window (just expired) → not yet closed.
         c.expire_at = now_unix() - 1;
-        assert!(c.check_expired().is_none(), "must allow the 25s grace window");
+        assert!(
+            c.check_expired().is_none(),
+            "must allow the 25s grace window"
+        );
 
         // Past the grace window → DisconnectExpired (3005).
         c.expire_at = now_unix() - 100;

@@ -22,9 +22,7 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::grpc::{
-    api_err, channel_caps as pb_channel_caps, to_pb_client_info, to_pb_publication,
-};
+use crate::grpc::{api_err, channel_caps as pb_channel_caps, to_pb_client_info, to_pb_publication};
 
 type Raw = Box<RawValue>;
 
@@ -409,7 +407,8 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
             if r.user.is_empty() {
                 return err(id, 107, "bad request");
             }
-            node.disconnect_user(&r.user, 3012, "force disconnect").await;
+            node.disconnect_user(&r.user, 3012, "force disconnect")
+                .await;
             void(id)
         }
         "presence" => {
@@ -530,7 +529,11 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
             if req.channels.is_empty() || req.data.is_empty() {
                 return reply(Some(api_err(107, "bad request")), Vec::new());
             }
-            if let Some(e) = req.channels.iter().find_map(|ch| pb_channel_caps(node, ch).err()) {
+            if let Some(e) = req
+                .channels
+                .iter()
+                .find_map(|ch| pb_channel_caps(node, ch).err())
+            {
                 return reply(Some(e), Vec::new());
             }
             for ch in &req.channels {
@@ -556,7 +559,8 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
             if req.user.is_empty() {
                 return reply(Some(api_err(107, "bad request")), Vec::new());
             }
-            node.disconnect_user(&req.user, 3012, "force disconnect").await;
+            node.disconnect_user(&req.user, 3012, "force disconnect")
+                .await;
             reply(None, Vec::new())
         }
         pb::MethodType::Presence => {

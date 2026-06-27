@@ -121,7 +121,10 @@ async fn metrics(State(node): State<Arc<Node>>) -> Response {
     }
 
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
         body,
     )
         .into_response()

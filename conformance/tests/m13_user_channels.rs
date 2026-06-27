@@ -32,10 +32,19 @@ async fn sub_error_code(ws_url: &str, user: &str, channel: &str) -> u64 {
 async fn listed_user_subscribes_others_denied() {
     let s = Server::start_with(&["--token_hmac_secret_key", SECRET]).await;
     // Listed users may subscribe.
-    assert_eq!(sub_error_code(&s.ws_url(), "alice", "dialog#alice,bob").await, 0);
-    assert_eq!(sub_error_code(&s.ws_url(), "bob", "dialog#alice,bob").await, 0);
+    assert_eq!(
+        sub_error_code(&s.ws_url(), "alice", "dialog#alice,bob").await,
+        0
+    );
+    assert_eq!(
+        sub_error_code(&s.ws_url(), "bob", "dialog#alice,bob").await,
+        0
+    );
     // An unlisted user is denied (103).
-    assert_eq!(sub_error_code(&s.ws_url(), "carol", "dialog#alice,bob").await, 103);
+    assert_eq!(
+        sub_error_code(&s.ws_url(), "carol", "dialog#alice,bob").await,
+        103
+    );
     // Single-user channel.
     assert_eq!(sub_error_code(&s.ws_url(), "42", "personal#42").await, 0);
     assert_eq!(sub_error_code(&s.ws_url(), "99", "personal#42").await, 103);
@@ -51,6 +60,9 @@ async fn user_channel_outcome_matches_go() {
     for (user, who) in [("alice", "listed"), ("carol", "unlisted")] {
         let go_code = sub_error_code(&go.ws_url(), user, ch).await;
         let rust_code = sub_error_code(&rust.ws_url(), user, ch).await;
-        assert_eq!(go_code, rust_code, "{who} user {user}: go={go_code} rust={rust_code}");
+        assert_eq!(
+            go_code, rust_code,
+            "{who} user {user}: go={go_code} rust={rust_code}"
+        );
     }
 }

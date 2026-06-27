@@ -44,7 +44,10 @@ async fn sub_refresh_valid_token_succeeds() {
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "sub_refresh error: {r}");
     assert_eq!(r["result"]["expires"], true, "expected expires: {r}");
-    assert!(r["result"]["ttl"].as_u64().unwrap_or(0) > 0, "expected ttl: {r}");
+    assert!(
+        r["result"]["ttl"].as_u64().unwrap_or(0) > 0,
+        "expected ttl: {r}"
+    );
 }
 
 #[tokio::test]
@@ -64,7 +67,8 @@ async fn sub_refresh_empty_channel_disconnects_3003() {
     let s = Server::start_with_config(CFG).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":11,"params":{"channel":"","token":"x"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":11,"params":{"channel":"","token":"x"}}"#)
+        .await;
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3003, "empty channel must disconnect 3003");
 }

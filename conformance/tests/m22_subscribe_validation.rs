@@ -12,7 +12,10 @@ async fn duplicate_subscribe_is_already_subscribed() {
     let first = c.subscribe(2, "room").await;
     assert!(first["error"].is_null(), "first subscribe: {first}");
     let second = c.subscribe(3, "room").await;
-    assert_eq!(second["error"]["code"], 105, "duplicate subscribe: {second}");
+    assert_eq!(
+        second["error"]["code"], 105,
+        "duplicate subscribe: {second}"
+    );
 }
 
 #[tokio::test]
@@ -20,7 +23,8 @@ async fn empty_subscribe_channel_disconnects_bad_request() {
     let s = Server::start().await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":1,"params":{"channel":""}}"#).await;
+    c.send_raw(r#"{"id":2,"method":1,"params":{"channel":""}}"#)
+        .await;
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3003, "empty subscribe channel must disconnect 3003");
 }
@@ -30,7 +34,8 @@ async fn empty_unsubscribe_channel_disconnects_bad_request() {
     let s = Server::start().await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":2,"params":{"channel":""}}"#).await;
+    c.send_raw(r#"{"id":2,"method":2,"params":{"channel":""}}"#)
+        .await;
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3003, "empty unsubscribe channel must disconnect 3003");
 }

@@ -358,7 +358,8 @@ mod tests {
         // is identical for RSA/ECDSA JWKs.
         let secret = b"jwks-shared-secret";
         let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret);
-        let jwks_json = format!(r#"{{"keys":[{{"kty":"oct","kid":"key1","k":"{k}","alg":"HS256"}}]}}"#);
+        let jwks_json =
+            format!(r#"{{"keys":[{{"kty":"oct","kid":"key1","k":"{k}","alg":"HS256"}}]}}"#);
         let set: JwkSet = serde_json::from_str(&jwks_json).unwrap();
 
         let verifier = TokenVerifier::new("", None, None).unwrap();

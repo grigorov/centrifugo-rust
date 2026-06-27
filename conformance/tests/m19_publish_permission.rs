@@ -26,13 +26,21 @@ async fn publish_code(ws_url: &str) -> u64 {
 #[tokio::test]
 async fn client_publish_denied_without_option() {
     let s = Server::start_with_config(r#"{"token_hmac_secret_key":"secret"}"#).await;
-    assert_eq!(publish_code(&s.ws_url()).await, 103, "publish must be denied");
+    assert_eq!(
+        publish_code(&s.ws_url()).await,
+        103,
+        "publish must be denied"
+    );
 }
 
 #[tokio::test]
 async fn client_publish_allowed_with_option() {
     let s = Server::start_with_config(r#"{"token_hmac_secret_key":"secret","publish":true}"#).await;
-    assert_eq!(publish_code(&s.ws_url()).await, 0, "publish must be allowed");
+    assert_eq!(
+        publish_code(&s.ws_url()).await,
+        0,
+        "publish must be allowed"
+    );
 }
 
 #[tokio::test]

@@ -12,7 +12,10 @@ async fn admin_ui_served_when_enabled() {
     assert_eq!(index.status().as_u16(), 200);
     let html = index.text().await.unwrap();
     assert!(html.contains("Centrifugo admin panel"), "index: {html}");
-    assert!(html.contains("bundle.js"), "index references bundle: {html}");
+    assert!(
+        html.contains("bundle.js"),
+        "index references bundle: {html}"
+    );
 
     let bundle = reqwest::get(format!("{}/bundle.js", s.http)).await.unwrap();
     assert_eq!(bundle.status().as_u16(), 200);
@@ -25,7 +28,9 @@ async fn admin_ui_served_when_enabled() {
     assert!(ct.contains("javascript"), "bundle content-type: {ct}");
     assert!(!bundle.bytes().await.unwrap().is_empty(), "bundle empty");
 
-    let styles = reqwest::get(format!("{}/styles.css", s.http)).await.unwrap();
+    let styles = reqwest::get(format!("{}/styles.css", s.http))
+        .await
+        .unwrap();
     assert_eq!(styles.status().as_u16(), 200);
 }
 
@@ -41,8 +46,9 @@ async fn admin_api_info_serves_live_node_stats() {
     // The admin SPA polls POST /admin/api {method:"info"} on an interval (there is
     // no admin WebSocket in centrifugo v2.8.6) and renders the node stats. Verify
     // the info reply carries the fields it reads.
-    let s = Server::start_with_config(r#"{"admin":true,"admin_password":"pw","admin_secret":"sec"}"#)
-        .await;
+    let s =
+        Server::start_with_config(r#"{"admin":true,"admin_password":"pw","admin_secret":"sec"}"#)
+            .await;
     let client = reqwest::Client::new();
 
     let auth = client
@@ -66,7 +72,10 @@ async fn admin_api_info_serves_live_node_stats() {
     let text = resp.text().await.unwrap();
     let r: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
     let node = &r["result"]["nodes"][0];
-    assert!(!node["uid"].as_str().unwrap_or("").is_empty(), "node uid: {r}");
+    assert!(
+        !node["uid"].as_str().unwrap_or("").is_empty(),
+        "node uid: {r}"
+    );
     assert!(node["num_clients"].is_number(), "num_clients: {r}");
     assert!(node["num_users"].is_number(), "num_users: {r}");
     assert!(node["num_channels"].is_number(), "num_channels: {r}");

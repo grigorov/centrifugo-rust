@@ -476,11 +476,7 @@ fn apply_control(hub: &Hub, cmd: ControlMessage) {
                 }
             }
         }
-        ControlMessage::Disconnect {
-            user,
-            code,
-            reason,
-        } => {
+        ControlMessage::Disconnect { user, code, reason } => {
             for h in hub.user_clients(&user) {
                 if let Some(ctrl) = &h.ctrl {
                     let _ = ctrl.try_send(Signal::Disconnect(Disconnect::new(

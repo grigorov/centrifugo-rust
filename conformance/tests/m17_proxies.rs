@@ -40,7 +40,8 @@ async fn rpc_proxy_returns_result() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"sum","data":{"a":1}}}"#).await;
+    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"sum","data":{"a":1}}}"#)
+        .await;
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "rpc error: {r}");
     assert_eq!(r["result"]["data"]["answer"], 42, "rpc result: {r}");
@@ -55,7 +56,8 @@ async fn rpc_proxy_ack_only_is_success_without_data() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"ack"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"ack"}}"#)
+        .await;
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "ack-only rpc must succeed: {r}");
     // Go emits `{}` (data omitempty), not `{"data":null}`.
@@ -70,7 +72,8 @@ async fn rpc_without_proxy_is_method_not_found() {
     let s = Server::start().await; // insecure, no rpc proxy
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"x"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"x"}}"#)
+        .await;
     let r = c.next_json().await;
     assert_eq!(r["error"]["code"], 104, "expected method not found: {r}");
 }
@@ -98,8 +101,9 @@ async fn connect_proxy_grants_server_side_channels() {
 #[tokio::test]
 async fn publish_proxy_transforms_data() {
     let url = spawn(r#"{"result":{"data":{"x":2}}}"#.into()).await;
-    let cfg =
-        format!(r#"{{"client_insecure":true,"proxy_publish":true,"proxy_publish_endpoint":"{url}"}}"#);
+    let cfg = format!(
+        r#"{{"client_insecure":true,"proxy_publish":true,"proxy_publish_endpoint":"{url}"}}"#
+    );
     let s = Server::start_with_config(&cfg).await;
 
     let mut sub = WsJsonClient::connect(&s.ws_url()).await;
@@ -118,8 +122,9 @@ async fn publish_proxy_transforms_data() {
 #[tokio::test]
 async fn publish_proxy_denies() {
     let url = spawn(r#"{"error":{"code":1000,"message":"nope"}}"#.into()).await;
-    let cfg =
-        format!(r#"{{"client_insecure":true,"proxy_publish":true,"proxy_publish_endpoint":"{url}"}}"#);
+    let cfg = format!(
+        r#"{{"client_insecure":true,"proxy_publish":true,"proxy_publish_endpoint":"{url}"}}"#
+    );
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
@@ -163,9 +168,13 @@ async fn subscribe_proxy_disconnect_closes_connection() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":1,"params":{"channel":"room"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":1,"params":{"channel":"room"}}"#)
+        .await;
     let (code, _) = c.next_close().await;
-    assert_eq!(code, 4001, "subscribe-proxy disconnect must close with its code");
+    assert_eq!(
+        code, 4001,
+        "subscribe-proxy disconnect must close with its code"
+    );
 }
 
 // ---- Refresh proxy ----
@@ -184,7 +193,8 @@ async fn refresh_proxy_extends_and_expires() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
+        .await;
     let r = c.next_json().await;
     assert!(r["error"].is_null(), "refresh error: {r}");
     assert_eq!(r["result"]["expires"], true, "refresh result: {r}");
@@ -195,7 +205,8 @@ async fn refresh_proxy_extends_and_expires() {
     let s2 = Server::start_with_config(&cfg).await;
     let mut c2 = WsJsonClient::connect(&s2.ws_url()).await;
     c2.connect_command().await;
-    c2.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
+    c2.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
+        .await;
     let (code, _) = c2.next_close().await;
     assert_eq!(code, 3005, "expired refresh proxy must disconnect 3005");
 }
@@ -209,7 +220,8 @@ async fn refresh_proxy_missing_result_disconnects_expired() {
     let s = Server::start_with_config(&cfg).await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#).await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
+        .await;
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3005, "missing refresh result must disconnect 3005");
 }

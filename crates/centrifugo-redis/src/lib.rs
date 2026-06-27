@@ -35,8 +35,8 @@ use futures_util::StreamExt;
 use prost::Message as _;
 use redis::aio::ConnectionManager;
 use redis::sentinel::Sentinel;
-use tokio::sync::{Mutex, RwLock};
 use redis::AsyncCommands;
+use tokio::sync::{Mutex, RwLock};
 const PREFIX: &str = "centrifugo";
 
 // ---- centrifuge-compatible pub/sub wire format (Go interop) ----
@@ -53,13 +53,27 @@ fn to_pb_info(ci: &ClientInfo) -> pb::ClientInfo {
     pb::ClientInfo {
         user: ci.user.clone(),
         client: ci.client.clone(),
-        conn_info: ci.conn_info.as_ref().map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
-        chan_info: ci.chan_info.as_ref().map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
+        conn_info: ci
+            .conn_info
+            .as_ref()
+            .map(|r| r.as_bytes().to_vec())
+            .unwrap_or_default(),
+        chan_info: ci
+            .chan_info
+            .as_ref()
+            .map(|r| r.as_bytes().to_vec())
+            .unwrap_or_default(),
     }
 }
 
 fn from_pb_info(pi: pb::ClientInfo) -> ClientInfo {
-    let opt = |b: Vec<u8>| if b.is_empty() { None } else { Some(Raw::from_bytes(b)) };
+    let opt = |b: Vec<u8>| {
+        if b.is_empty() {
+            None
+        } else {
+            Some(Raw::from_bytes(b))
+        }
+    };
     ClientInfo {
         user: pi.user,
         client: pi.client,
@@ -276,13 +290,20 @@ impl RedisEngine {
         route: RouteFn,
     ) -> anyhow::Result<Self> {
         let mut addrs: Vec<String> = Vec::new();
-        for s in sentinels.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        for s in sentinels
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             if s.contains("://") {
                 addrs.push(s.to_string());
             } else {
                 // Go validates each Sentinel address with net.SplitHostPort and
                 // fails fast on a malformed (e.g. portless) entry; mirror that.
-                if s.rsplit_once(':').map(|(h, p)| h.is_empty() || p.is_empty()) != Some(false) {
+                if s.rsplit_once(':')
+                    .map(|(h, p)| h.is_empty() || p.is_empty())
+                    != Some(false)
+                {
                     anyhow::bail!("malformed Sentinel address (want host:port): {s}");
                 }
                 addrs.push(format!("redis://{s}"));
@@ -352,7 +373,10 @@ impl RedisEngine {
     /// Read the full retained history + top position via centrifuge's historySource
     /// (the meta epoch is created lazily from the Redis server clock, like Go).
     /// Each list element is `__<offset>__<protobuf Publication>`; returned ascending.
-    async fn read_history(&self, channel: &str) -> anyhow::Result<(Vec<Publication>, StreamPosition)> {
+    async fn read_history(
+        &self,
+        channel: &str,
+    ) -> anyhow::Result<(Vec<Publication>, StreamPosition)> {
         let mut conn = self.mgr.read().await.clone();
         let (offset, epoch, pubs): (Option<u64>, Option<String>, Option<Vec<Vec<u8>>>) =
             redis::Script::new(HISTORY)
@@ -380,7 +404,13 @@ impl RedisEngine {
             .collect();
         // LPUSH stores newest-first; return ascending by offset (callers order).
         publications.sort_by_key(|p| p.offset);
-        Ok((publications, StreamPosition { offset: top_offset, epoch }))
+        Ok((
+            publications,
+            StreamPosition {
+                offset: top_offset,
+                epoch,
+            },
+        ))
     }
 }
 
@@ -424,7 +454,9 @@ impl Engine for RedisEngine {
         // subscriber) applies it.
         let payload = serde_json::to_vec(&msg)?;
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn.publish(format!("{PREFIX}.control.rust"), payload).await?;
+        let _: () = conn
+            .publish(format!("{PREFIX}.control.rust"), payload)
+            .await?;
         Ok(())
     }
 
@@ -549,4 +581,3 @@ fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-

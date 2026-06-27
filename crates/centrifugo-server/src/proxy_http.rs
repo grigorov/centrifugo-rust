@@ -34,8 +34,7 @@ pub fn build_proxies(s: &Settings) -> Proxies {
             .map(|e| Arc::new(HttpSubscribeProxy::new(e)) as Arc<dyn SubscribeProxy>),
         publish: p(&s.proxy_publish_endpoint)
             .map(|e| Arc::new(HttpPublishProxy::new(e)) as Arc<dyn PublishProxy>),
-        rpc: p(&s.proxy_rpc_endpoint)
-            .map(|e| Arc::new(HttpRpcProxy::new(e)) as Arc<dyn RpcProxy>),
+        rpc: p(&s.proxy_rpc_endpoint).map(|e| Arc::new(HttpRpcProxy::new(e)) as Arc<dyn RpcProxy>),
     }
 }
 

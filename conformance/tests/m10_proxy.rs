@@ -50,7 +50,12 @@ async fn connect_proxy_grants_identity() {
 
     // The proxied identity shows up in presence.
     c.subscribe(2, "room").await;
-    let p = api_post(&s.http, "k", r#"{"method":"presence","params":{"channel":"room"}}"#).await;
+    let p = api_post(
+        &s.http,
+        "k",
+        r#"{"method":"presence","params":{"channel":"room"}}"#,
+    )
+    .await;
     let presence = p["result"]["presence"].as_object().expect("presence map");
     let entry = presence.values().next().expect("one presence entry");
     assert_eq!(entry["user"], "proxied-user", "presence: {p}");
@@ -67,7 +72,10 @@ async fn connect_proxy_error_relays_error_reply() {
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.send_raw(r#"{"id":1,"params":{}}"#).await;
     let reply = c.next_json().await;
-    assert_eq!(reply["error"]["code"], 1000, "expected relayed proxy error: {reply}");
+    assert_eq!(
+        reply["error"]["code"], 1000,
+        "expected relayed proxy error: {reply}"
+    );
 }
 
 #[tokio::test]

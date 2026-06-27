@@ -58,7 +58,13 @@ impl MemoryEngine {
         }
     }
 
-    fn add_to_history(&self, channel: &str, data: &[u8], info: Option<ClientInfo>, opts: PublishOptions) {
+    fn add_to_history(
+        &self,
+        channel: &str,
+        data: &[u8],
+        info: Option<ClientInfo>,
+        opts: PublishOptions,
+    ) {
         let mut hist = self.history.lock();
         let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
         stream.offset += 1;
@@ -210,7 +216,12 @@ impl Engine for MemoryEngine {
     }
 
     async fn presence(&self, channel: &str) -> anyhow::Result<HashMap<String, ClientInfo>> {
-        Ok(self.presence.lock().get(channel).cloned().unwrap_or_default())
+        Ok(self
+            .presence
+            .lock()
+            .get(channel)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn presence_stats(&self, channel: &str) -> anyhow::Result<(u32, u32)> {
@@ -241,7 +252,10 @@ mod tests {
                 publication,
             } = msg
             {
-                let data = publication.data.map(|d| d.as_bytes().to_vec()).unwrap_or_default();
+                let data = publication
+                    .data
+                    .map(|d| d.as_bytes().to_vec())
+                    .unwrap_or_default();
                 r2.lock().unwrap().push((channel, data));
             }
         }));
@@ -279,11 +293,29 @@ mod tests {
     async fn presence_add_read_stats() {
         let engine = MemoryEngine::new(Arc::new(|_| {}));
         engine
-            .add_presence("room", "c1", ClientInfo { user: "u1".into(), client: "c1".into(), ..Default::default() }, 0)
+            .add_presence(
+                "room",
+                "c1",
+                ClientInfo {
+                    user: "u1".into(),
+                    client: "c1".into(),
+                    ..Default::default()
+                },
+                0,
+            )
             .await
             .unwrap();
         engine
-            .add_presence("room", "c2", ClientInfo { user: "u1".into(), client: "c2".into(), ..Default::default() }, 0)
+            .add_presence(
+                "room",
+                "c2",
+                ClientInfo {
+                    user: "u1".into(),
+                    client: "c2".into(),
+                    ..Default::default()
+                },
+                0,
+            )
             .await
             .unwrap();
         assert_eq!(engine.presence("room").await.unwrap().len(), 2);

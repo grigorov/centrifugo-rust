@@ -107,7 +107,10 @@ async fn grpc_channels_and_info() {
         .result
         .expect("channels result")
         .channels;
-    assert!(channels.iter().any(|x| x == "room"), "channels: {channels:?}");
+    assert!(
+        channels.iter().any(|x| x == "room"),
+        "channels: {channels:?}"
+    );
 
     let nodes = c
         .info(with_key(pb::InfoRequest {}, KEY))

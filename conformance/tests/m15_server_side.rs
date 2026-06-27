@@ -54,7 +54,10 @@ async fn unknown_namespace_in_token_fails_connect() {
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     // "nope:room" names an undefined namespace -> connect error 102.
     let reply = c.connect_with_token(&token("u", &["nope:room"])).await;
-    assert_eq!(reply["error"]["code"], 102, "expected unknown channel: {reply}");
+    assert_eq!(
+        reply["error"]["code"], 102,
+        "expected unknown channel: {reply}"
+    );
 }
 
 #[tokio::test]

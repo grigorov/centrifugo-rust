@@ -6,11 +6,7 @@ use conformance::{api_post, api_status, Server};
 
 #[tokio::test]
 async fn env_provides_api_key() {
-    let s = Server::start_env(
-        &[("CENTRIFUGO_API_KEY", "envkey")],
-        &["--client_insecure"],
-    )
-    .await;
+    let s = Server::start_env(&[("CENTRIFUGO_API_KEY", "envkey")], &["--client_insecure"]).await;
 
     // The env-provided key authorizes the HTTP API.
     let r = api_post(&s.http, "envkey", r#"{"method":"info","params":{}}"#).await;

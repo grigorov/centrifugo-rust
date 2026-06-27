@@ -70,7 +70,10 @@ impl Settings {
         fill(&mut self.token_hmac_secret_key, "TOKEN_HMAC_SECRET_KEY");
         fill(&mut self.token_rsa_public_key, "TOKEN_RSA_PUBLIC_KEY");
         fill(&mut self.token_ecdsa_public_key, "TOKEN_ECDSA_PUBLIC_KEY");
-        fill(&mut self.token_jwks_public_endpoint, "TOKEN_JWKS_PUBLIC_ENDPOINT");
+        fill(
+            &mut self.token_jwks_public_endpoint,
+            "TOKEN_JWKS_PUBLIC_ENDPOINT",
+        );
         fill(&mut self.api_key, "API_KEY");
         fill(&mut self.proxy_connect_endpoint, "PROXY_CONNECT_ENDPOINT");
         if !self.client_insecure && env("CLIENT_INSECURE").as_deref() == Some("true") {

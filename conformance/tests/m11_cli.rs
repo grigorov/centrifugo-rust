@@ -5,7 +5,13 @@ use conformance::{run_cli, Server, WsJsonClient};
 
 #[tokio::test]
 async fn gentoken_produces_valid_connection_token() {
-    let (code, out) = run_cli(&["gentoken", "--token_hmac_secret_key", "secret", "-u", "alice"]);
+    let (code, out) = run_cli(&[
+        "gentoken",
+        "--token_hmac_secret_key",
+        "secret",
+        "-u",
+        "alice",
+    ]);
     assert_eq!(code, 0, "gentoken exit code");
     let token = out.trim().to_string();
     assert!(!token.is_empty(), "empty token");

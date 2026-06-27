@@ -62,7 +62,11 @@ async fn admin_auth_issues_token_that_authorizes_api() {
         .send()
         .await
         .unwrap();
-    assert_eq!(main_api.status().as_u16(), 401, "admin token must not work on /api");
+    assert_eq!(
+        main_api.status().as_u16(),
+        401,
+        "admin token must not work on /api"
+    );
 }
 
 #[tokio::test]
@@ -87,5 +91,9 @@ async fn admin_insecure_skips_auth() {
         .send()
         .await
         .unwrap();
-    assert_eq!(api.status().as_u16(), 200, "insecure admin api must be open");
+    assert_eq!(
+        api.status().as_u16(),
+        200,
+        "insecure admin api must be open"
+    );
 }

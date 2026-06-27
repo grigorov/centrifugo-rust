@@ -93,7 +93,10 @@ async fn caught_up_client_recovers_after_history_lifetime_window() {
         rec["result"]["recovered"].as_bool().unwrap_or(false),
         "caught-up client must recover after the window: {rec}"
     );
-    let n = rec["result"]["publications"].as_array().map(|a| a.len()).unwrap_or(0);
+    let n = rec["result"]["publications"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     assert_eq!(n, 0, "no missed publications expected: {rec}");
 }
 

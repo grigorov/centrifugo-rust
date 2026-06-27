@@ -12,7 +12,8 @@ async fn node_connects_via_sentinel_and_pubsub_works() {
         return;
     };
     let cfg = format!(r#"{{"client_insecure":true,"api_key":"{KEY}"}}"#);
-    let s = Server::start_redis_sentinel(&sentinel.master_name, &sentinel.sentinel_addr, &cfg).await;
+    let s =
+        Server::start_redis_sentinel(&sentinel.master_name, &sentinel.sentinel_addr, &cfg).await;
 
     // A subscriber on the sentinel-backed node.
     let mut sub = WsJsonClient::connect(&s.ws_url()).await;
@@ -31,7 +32,10 @@ async fn node_connects_via_sentinel_and_pubsub_works() {
 
     let push = sub.next_json().await;
     assert_eq!(push["result"]["channel"], "room", "push: {push}");
-    assert_eq!(push["result"]["data"]["data"]["via"], "sentinel", "push: {push}");
+    assert_eq!(
+        push["result"]["data"]["data"]["via"], "sentinel",
+        "push: {push}"
+    );
 }
 
 #[tokio::test]
@@ -40,7 +44,8 @@ async fn presence_works_via_sentinel() {
         return;
     };
     let cfg = format!(r#"{{"client_insecure":true,"api_key":"{KEY}","presence":true}}"#);
-    let s = Server::start_redis_sentinel(&sentinel.master_name, &sentinel.sentinel_addr, &cfg).await;
+    let s =
+        Server::start_redis_sentinel(&sentinel.master_name, &sentinel.sentinel_addr, &cfg).await;
 
     let mut sub = WsJsonClient::connect(&s.ws_url()).await;
     sub.connect_command().await;

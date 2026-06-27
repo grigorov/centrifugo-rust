@@ -103,20 +103,25 @@ async fn no_token_close_code_matches_go() {
         c.send_raw(r#"{"id":1,"params":{}}"#).await;
         c.next_close().await.0
     };
-    assert_eq!(go_code, rust_code, "missing-token close code: go={go_code} rust={rust_code}");
+    assert_eq!(
+        go_code, rust_code,
+        "missing-token close code: go={go_code} rust={rust_code}"
+    );
 }
 
 #[tokio::test]
 async fn client_anonymous_allows_tokenless_connect() {
     // With client_anonymous=true and no token, Go accepts an empty-user connection.
-    let s = Server::start_with_config(
-        r#"{"token_hmac_secret_key":"secret","client_anonymous":true}"#,
-    )
-    .await;
+    let s =
+        Server::start_with_config(r#"{"token_hmac_secret_key":"secret","client_anonymous":true}"#)
+            .await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     let reply = c.connect_reply().await;
     assert!(reply["error"].is_null(), "anon connect error: {reply}");
-    assert!(reply["result"]["client"].as_str().is_some(), "no client id: {reply}");
+    assert!(
+        reply["result"]["client"].as_str().is_some(),
+        "no client id: {reply}"
+    );
 }
 
 #[tokio::test]
@@ -134,7 +139,10 @@ async fn insecure_still_uses_token_identity() {
     let p = c.presence(3, "room").await;
     let presence = p["result"]["presence"].as_object().expect("presence map");
     let entry = presence.values().next().expect("one entry");
-    assert_eq!(entry["user"], "token-user", "insecure must keep token user: {p}");
+    assert_eq!(
+        entry["user"], "token-user",
+        "insecure must keep token user: {p}"
+    );
 }
 
 #[tokio::test]
@@ -177,7 +185,8 @@ async fn refresh_with_empty_token_disconnects_3003() {
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     assert!(c.connect_with_token(&token).await.get("error").is_none());
 
-    c.send_raw(r#"{"id":2,"method":10,"params":{"token":""}}"#).await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{"token":""}}"#)
+        .await;
     let (code, _reason) = c.next_close().await;
     assert_eq!(code, 3003, "empty refresh token must close with 3003");
 }

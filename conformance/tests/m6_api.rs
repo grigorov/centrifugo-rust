@@ -124,19 +124,39 @@ async fn api_validation_error_codes() {
     let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
 
     // publish empty data -> 107.
-    let r = api_post(&s.http, KEY, r#"{"method":"publish","params":{"channel":"x"}}"#).await;
+    let r = api_post(
+        &s.http,
+        KEY,
+        r#"{"method":"publish","params":{"channel":"x"}}"#,
+    )
+    .await;
     assert_eq!(r["error"]["code"], 107, "empty data: {r}");
 
     // presence on a channel without presence enabled -> 108.
-    let r = api_post(&s.http, KEY, r#"{"method":"presence","params":{"channel":"x"}}"#).await;
+    let r = api_post(
+        &s.http,
+        KEY,
+        r#"{"method":"presence","params":{"channel":"x"}}"#,
+    )
+    .await;
     assert_eq!(r["error"]["code"], 108, "presence disabled: {r}");
 
     // history on a channel without history enabled -> 108.
-    let r = api_post(&s.http, KEY, r#"{"method":"history","params":{"channel":"x"}}"#).await;
+    let r = api_post(
+        &s.http,
+        KEY,
+        r#"{"method":"history","params":{"channel":"x"}}"#,
+    )
+    .await;
     assert_eq!(r["error"]["code"], 108, "history disabled: {r}");
 
     // empty channel -> 107.
-    let r = api_post(&s.http, KEY, r#"{"method":"presence","params":{"channel":""}}"#).await;
+    let r = api_post(
+        &s.http,
+        KEY,
+        r#"{"method":"presence","params":{"channel":""}}"#,
+    )
+    .await;
     assert_eq!(r["error"]["code"], 107, "empty channel: {r}");
 }
 

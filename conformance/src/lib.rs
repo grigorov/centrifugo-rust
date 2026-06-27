@@ -200,7 +200,14 @@ impl Redis {
         let port = pick_port();
         let addr = format!("127.0.0.1:{port}");
         let child = Command::new("redis-server")
-            .args(["--port", &port.to_string(), "--save", "", "--appendonly", "no"])
+            .args([
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
@@ -246,7 +253,14 @@ impl RedisSentinel {
         let master_name = "mymaster".to_string();
 
         let master = Command::new("redis-server")
-            .args(["--port", &master_port.to_string(), "--save", "", "--appendonly", "no"])
+            .args([
+                "--port",
+                &master_port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
@@ -276,7 +290,8 @@ impl RedisSentinel {
         let conf = format!(
             "port {sentinel_port}\nsentinel monitor {master_name} 127.0.0.1 {master_port} 1\nsentinel down-after-milliseconds {master_name} 5000\n"
         );
-        let conf_path = std::env::temp_dir().join(format!("centrifugo-sentinel-{sentinel_port}.conf"));
+        let conf_path =
+            std::env::temp_dir().join(format!("centrifugo-sentinel-{sentinel_port}.conf"));
         if std::fs::write(&conf_path, conf).is_err() {
             let _ = master.kill();
             return None;
@@ -384,8 +399,7 @@ pub fn run_go_client_token(ws_url: &str, token: &str) -> Option<(i32, String)> {
         .expect("run centrifuge-go client");
     Some((
         out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned()
-            + &String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr),
     ))
 }
 

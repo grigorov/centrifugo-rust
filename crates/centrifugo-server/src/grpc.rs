@@ -10,7 +10,9 @@ use std::sync::Arc;
 use centrifugo_core::Node;
 use centrifugo_grpc::pb;
 use centrifugo_grpc::pb::centrifugo_server::{Centrifugo, CentrifugoServer};
-use centrifugo_protocol::messages::{ClientInfo as DomainClientInfo, Publication as DomainPublication};
+use centrifugo_protocol::messages::{
+    ClientInfo as DomainClientInfo, Publication as DomainPublication,
+};
 use tonic::{Request, Response, Status};
 
 use crate::VERSION;

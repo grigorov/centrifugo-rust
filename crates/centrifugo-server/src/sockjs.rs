@@ -124,7 +124,9 @@ pub async fn xhr_send(
     };
     let messages = match parse_send_body(&body) {
         Some(m) => m,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Broken JSON encoding.").into_response(),
+        None => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Broken JSON encoding.").into_response()
+        }
     };
     for m in messages {
         if session.incoming.send(m).await.is_err() {
@@ -151,7 +153,11 @@ fn create_session(node: &Arc<Node>, sessions: &Sessions, session_id: &str) {
 /// Drive one SockJS session through the shared `Client` state machine. Replies
 /// are enqueued on the outgoing channel (drained by polls); pushes are delivered
 /// to the same channel by the Node's fan-out.
-async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_tx: mpsc::Sender<Out>) {
+async fn run_session(
+    node: Arc<Node>,
+    mut incoming: mpsc::Receiver<String>,
+    out_tx: mpsc::Sender<Out>,
+) {
     let reply_tx = out_tx.clone();
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Signal>(16);
     let mut client = node.new_client(out_tx, ProtocolType::Json);
@@ -251,7 +257,10 @@ fn message_frame(msgs: &[String]) -> String {
             framed.push(line.to_string());
         }
     }
-    format!("a{}\n", serde_json::to_string(&framed).unwrap_or_else(|_| "[]".into()))
+    format!(
+        "a{}\n",
+        serde_json::to_string(&framed).unwrap_or_else(|_| "[]".into())
+    )
 }
 
 /// Build a SockJS close frame `c[code,"reason"]\n`.
@@ -267,8 +276,14 @@ fn sockjs_body(frame: &str) -> Response {
     (
         cors_headers(),
         [
-            (header::CONTENT_TYPE, "application/javascript; charset=UTF-8"),
-            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate, max-age=0"),
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=UTF-8",
+            ),
+            (
+                header::CACHE_CONTROL,
+                "no-store, no-cache, must-revalidate, max-age=0",
+            ),
         ],
         frame.to_string(),
     )

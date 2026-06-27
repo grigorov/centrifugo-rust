@@ -54,21 +54,40 @@ async fn metrics_per_command_counters() {
 
     // Per-method command counters present and counted.
     assert!(
-        gauge(&body, r#"centrifugo_client_command_count{method="connect"}"#).unwrap_or(0) >= 1,
+        gauge(
+            &body,
+            r#"centrifugo_client_command_count{method="connect"}"#
+        )
+        .unwrap_or(0)
+            >= 1,
         "connect command count:\n{body}"
     );
     assert!(
-        gauge(&body, r#"centrifugo_client_command_count{method="subscribe"}"#).unwrap_or(0) >= 1,
+        gauge(
+            &body,
+            r#"centrifugo_client_command_count{method="subscribe"}"#
+        )
+        .unwrap_or(0)
+            >= 1,
         "subscribe command count:\n{body}"
     );
     // A publication fan-out was recorded.
     assert!(
-        gauge(&body, r#"centrifugo_node_messages_sent_count{type="publication"}"#).unwrap_or(0) >= 1,
+        gauge(
+            &body,
+            r#"centrifugo_node_messages_sent_count{type="publication"}"#
+        )
+        .unwrap_or(0)
+            >= 1,
         "messages_sent publication:\n{body}"
     );
     // One websocket connection accepted.
     assert!(
-        gauge(&body, r#"centrifugo_transport_connect_count{transport="websocket"}"#).unwrap_or(0)
+        gauge(
+            &body,
+            r#"centrifugo_transport_connect_count{transport="websocket"}"#
+        )
+        .unwrap_or(0)
             >= 1,
         "connect_count websocket:\n{body}"
     );

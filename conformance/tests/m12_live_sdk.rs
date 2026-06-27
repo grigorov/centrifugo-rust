@@ -28,7 +28,13 @@ async fn centrifuge_go_sdk_authenticates_with_jwt() {
     // client-side publish is permitted (non-insecure requires the option).
     let s =
         Server::start_with_config(r#"{"token_hmac_secret_key":"m12secret","publish":true}"#).await;
-    let (code, token) = run_cli(&["gentoken", "--token_hmac_secret_key", "m12secret", "-u", "sdk-user"]);
+    let (code, token) = run_cli(&[
+        "gentoken",
+        "--token_hmac_secret_key",
+        "m12secret",
+        "-u",
+        "sdk-user",
+    ]);
     assert_eq!(code, 0, "gentoken failed");
     let token = token.trim();
 
