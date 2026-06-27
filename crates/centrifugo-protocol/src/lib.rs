@@ -14,6 +14,14 @@ pub mod method;
 pub mod pb;
 pub mod raw;
 
+/// centrifuge inter-node control protocol (`controlpb` package) — generated from
+/// `proto/control.proto`. Wire-identical to centrifuge v0.14.2 for Go interop.
+pub mod controlpb {
+    #![allow(clippy::all)]
+    #![allow(missing_docs)]
+    include!(concat!(env!("OUT_DIR"), "/controlpb.rs"));
+}
+
 pub use codec::ProtocolType;
 pub use command::{Command, Push, Reply};
 pub use disconnect::Disconnect;

@@ -4,13 +4,25 @@
 //! channel + protobuf Publication/Join/Leave framing). Skips cleanly if
 //! `redis-server` or the Go oracle binary is absent.
 //!
-//! Scope: live pub/sub fan-out. History/presence/control remain Rust-native
-//! (different on-Redis format), so those don't cross-interop with Go nodes.
+//! Covers live pub/sub, history, presence, AND control (server-side
+//! unsubscribe/disconnect via centrifuge's `<prefix>.control` protobuf protocol),
+//! interoperating in both directions Go⇄Rust on one Redis.
 
 use conformance::oracle::Oracle;
 use conformance::{api_post, Redis, Server, WsJsonClient};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
 const KEY: &str = "apikey-interop";
+const SECRET: &str = "secret";
+
+fn token(user: &str) -> String {
+    encode(
+        &Header::new(Algorithm::HS256),
+        &serde_json::json!({ "sub": user }),
+        &EncodingKey::from_secret(SECRET.as_bytes()),
+    )
+    .unwrap()
+}
 
 #[tokio::test]
 async fn go_publish_reaches_rust_subscriber() {
@@ -246,4 +258,109 @@ async fn rust_presence_visible_to_go() {
         1,
         "go reads rust presence: {r}"
     );
+}
+
+// ---- Control interop (centrifuge `<prefix>.control` protobuf protocol) ----
+//
+// Server-side unsubscribe/disconnect on one node propagate to a user's clients on
+// the OTHER node, across the Go⇄Rust boundary.
+
+const CTRL: &str = r#""api_key":"apikey-interop","token_hmac_secret_key":"secret""#;
+
+#[tokio::test]
+async fn rust_api_unsubscribe_reaches_go_client() {
+    let Some(redis) = Redis::start().await else {
+        return;
+    };
+    let go_cfg = format!(
+        r#"{{"engine":"redis","redis_url":"redis://{}",{CTRL}}}"#,
+        redis.addr
+    );
+    let Some(go) = Oracle::start_with_config(&go_cfg).await else {
+        return;
+    };
+    let rust = Server::start_redis(&redis.addr, &format!(r#"{{{CTRL}}}"#)).await;
+
+    // Client on the GO node (user alice), subscribed to "cu".
+    let mut c = WsJsonClient::connect(&go.ws_url()).await;
+    assert!(c.connect_with_token(&token("alice")).await["error"].is_null());
+    assert!(c.subscribe(2, "cu").await["error"].is_null());
+
+    // The RUST node's API unsubscribes alice → control over Redis → Go node.
+    let r = api_post(
+        &rust.http,
+        KEY,
+        r#"{"method":"unsubscribe","params":{"user":"alice","channel":"cu"}}"#,
+    )
+    .await;
+    assert!(r["error"].is_null(), "rust api unsubscribe: {r}");
+
+    // The Go-connected client receives an Unsubscribe push (type 3).
+    let push = c.next_json().await;
+    assert_eq!(push["result"]["type"], 3, "unsubscribe push: {push}");
+    assert_eq!(push["result"]["channel"], "cu", "unsub channel: {push}");
+}
+
+#[tokio::test]
+async fn go_api_unsubscribe_reaches_rust_client() {
+    let Some(redis) = Redis::start().await else {
+        return;
+    };
+    let go_cfg = format!(
+        r#"{{"engine":"redis","redis_url":"redis://{}",{CTRL}}}"#,
+        redis.addr
+    );
+    let Some(go) = Oracle::start_with_config(&go_cfg).await else {
+        return;
+    };
+    let rust = Server::start_redis(&redis.addr, &format!(r#"{{{CTRL}}}"#)).await;
+
+    // Client on the RUST node (user bob), subscribed to "cu2".
+    let mut c = WsJsonClient::connect(&rust.ws_url()).await;
+    assert!(c.connect_with_token(&token("bob")).await["error"].is_null());
+    assert!(c.subscribe(2, "cu2").await["error"].is_null());
+
+    // The GO node's API unsubscribes bob → control over Redis → Rust node.
+    let r = api_post(
+        &go.http,
+        KEY,
+        r#"{"method":"unsubscribe","params":{"user":"bob","channel":"cu2"}}"#,
+    )
+    .await;
+    assert!(r["error"].is_null(), "go api unsubscribe: {r}");
+
+    let push = c.next_json().await;
+    assert_eq!(push["result"]["type"], 3, "unsubscribe push: {push}");
+    assert_eq!(push["result"]["channel"], "cu2", "unsub channel: {push}");
+}
+
+#[tokio::test]
+async fn rust_api_disconnect_reaches_go_client() {
+    let Some(redis) = Redis::start().await else {
+        return;
+    };
+    let go_cfg = format!(
+        r#"{{"engine":"redis","redis_url":"redis://{}",{CTRL}}}"#,
+        redis.addr
+    );
+    let Some(go) = Oracle::start_with_config(&go_cfg).await else {
+        return;
+    };
+    let rust = Server::start_redis(&redis.addr, &format!(r#"{{{CTRL}}}"#)).await;
+
+    // Client on the GO node (user carol).
+    let mut c = WsJsonClient::connect(&go.ws_url()).await;
+    assert!(c.connect_with_token(&token("carol")).await["error"].is_null());
+
+    // The RUST node's API disconnects carol → control over Redis → Go closes it.
+    let r = api_post(
+        &rust.http,
+        KEY,
+        r#"{"method":"disconnect","params":{"user":"carol"}}"#,
+    )
+    .await;
+    assert!(r["error"].is_null(), "rust api disconnect: {r}");
+
+    let (code, _) = c.next_close().await;
+    assert_eq!(code, 3012, "cross-node force disconnect (3012)");
 }

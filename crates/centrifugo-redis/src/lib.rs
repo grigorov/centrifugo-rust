@@ -1,25 +1,22 @@
-//! Redis engine — multi-node fan-out for a homogeneous Rust centrifugo cluster.
+//! Redis engine — multi-node fan-out, **byte-compatible with centrifuge v0.14.2's
+//! Redis format**, so a Go centrifugo node and a Rust node can share one Redis
+//! (live pub/sub, history, presence, and control all interoperate).
 //!
-//! - **Pub/sub:** every publication/join/leave is `PUBLISH`ed to
-//!   `centrifugo.pub.{channel}`; each node's subscriber task pattern-subscribes
-//!   to `centrifugo.pub.*` and routes incoming messages into the local hub. The
-//!   hub naturally drops messages for channels with no local subscriber, so
-//!   per-channel `SUBSCRIBE` is unnecessary (a targeted-subscribe optimization
-//!   for very large clusters is deferred). The publishing node also delivers via
-//!   the round-trip, so all nodes see an identical ordered stream.
-//! - **History:** list `centrifugo.hist.list.{channel}` (last N publications) +
-//!   meta hash `centrifugo.hist.meta.{channel}` (`offset`, `epoch`). Appended
-//!   atomically by a Lua script (HINCRBY offset, RPUSH, LTRIM, PEXPIRE). Each
-//!   element's absolute offset is derived from its position relative to the top
-//!   offset, so payloads need not embed it (centrifuge's list approach).
+//! - **Pub/sub:** publications are `PUBLISH`ed to `centrifugo.client.{channel}` as
+//!   a protobuf `Publication`; joins/leaves as `__j__`/`__l__` + protobuf
+//!   `ClientInfo`; history-tracked publications carry a `__<offset>__` prefix.
+//!   Each node pattern-subscribes to `centrifugo.client.*` and routes incoming
+//!   messages (via `extract_push`) into its local hub.
+//! - **History (list mode):** list `centrifugo.list.{channel}` (LPUSH,
+//!   `__<offset>__<protobuf Publication>`) + meta hash `centrifugo.list.meta.{channel}`
+//!   (`s`=offset, `e`=epoch from Redis `TIME`). Verbatim centrifuge add/read Lua.
 //! - **Presence:** data hash `centrifugo.presence.data.{channel}` (clientID →
-//!   ClientInfo) + expiry zset `centrifugo.presence.exp.{channel}` (clientID →
-//!   expire-at ms). Add/read are atomic Lua: add HSET+ZADD+PEXPIRE, read prunes
-//!   entries whose score has passed (crashed-node cleanup) then returns the hash.
-//!   The per-connection presence timer re-asserts entries before they expire.
-//!
-//! The wire contract is unchanged — Redis is internal — so the single-node
-//! goldens already pin the client-facing bytes.
+//!   protobuf `ClientInfo`) + expiry zset `centrifugo.presence.expire.{channel}`
+//!   (score = unix-seconds expire-at). Verbatim centrifuge add/rem/read Lua;
+//!   read prunes expired entries (crashed-node cleanup).
+//! - **Control:** server-side unsubscribe/disconnect ride `centrifugo.control` as
+//!   centrifuge `controlpb.Command` protobuf (origin `uid` + method + params), so
+//!   they propagate across Go and Rust nodes alike.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -193,31 +190,88 @@ return redis.call("hgetall", KEYS[2])
 pub struct RedisEngine {
     /// Swappable so the Sentinel watchdog can repoint commands at a new master.
     mgr: Arc<RwLock<ConnectionManager>>,
+    /// Origin node id stamped on outgoing control commands (centrifuge `Command.uid`).
+    node_uid: String,
+}
+
+/// Encode a control command as centrifuge's `controlpb.Command` (Go interop).
+fn encode_control(node_uid: &str, msg: &ControlMessage) -> Vec<u8> {
+    use centrifugo_protocol::controlpb;
+    let (method, params) = match msg {
+        ControlMessage::Unsubscribe { user, channel } => (
+            controlpb::MethodType::Unsubscribe as i32,
+            controlpb::Unsubscribe {
+                channel: channel.clone(),
+                user: user.clone(),
+            }
+            .encode_to_vec(),
+        ),
+        ControlMessage::Disconnect { user, code, reason } => (
+            controlpb::MethodType::Disconnect as i32,
+            controlpb::Disconnect {
+                user: user.clone(),
+                whitelist: Vec::new(),
+                code: *code,
+                reason: reason.clone(),
+                reconnect: false,
+            }
+            .encode_to_vec(),
+        ),
+    };
+    controlpb::Command {
+        uid: node_uid.to_string(),
+        method,
+        params,
+    }
+    .encode_to_vec()
+}
+
+/// Decode a centrifuge `controlpb.Command` into our `ControlMessage`. Returns
+/// `None` for node-info pings (method NODE) and anything undecodable.
+fn decode_control(bytes: &[u8]) -> Option<ControlMessage> {
+    use centrifugo_protocol::controlpb;
+    let cmd = controlpb::Command::decode(bytes).ok()?;
+    match controlpb::MethodType::try_from(cmd.method).ok()? {
+        controlpb::MethodType::Unsubscribe => {
+            let u = controlpb::Unsubscribe::decode(&cmd.params[..]).ok()?;
+            Some(ControlMessage::Unsubscribe {
+                user: u.user,
+                channel: u.channel,
+            })
+        }
+        controlpb::MethodType::Disconnect => {
+            let d = controlpb::Disconnect::decode(&cmd.params[..]).ok()?;
+            Some(ControlMessage::Disconnect {
+                user: d.user,
+                code: d.code,
+                reason: d.reason,
+            })
+        }
+        controlpb::MethodType::Node => None,
+    }
 }
 
 /// Subscribe a fresh pub/sub connection to the message pattern + control channel.
-/// Uses centrifuge's `<prefix>.client.*` so a Go node's publications are received.
+/// Uses centrifuge's `<prefix>.client.*` and `<prefix>.control` so a Go node's
+/// publications AND control commands (unsubscribe/disconnect) are received.
 async fn subscribe(client: &redis::Client) -> anyhow::Result<redis::aio::PubSub> {
     let mut pubsub = client.get_async_pubsub().await?;
     pubsub.psubscribe(format!("{PREFIX}.client.*")).await?;
-    // Rust-native control channel (distinct from Go's `<prefix>.control`, whose
-    // protobuf control protocol is not interop-supported).
-    pubsub.subscribe(format!("{PREFIX}.control.rust")).await?;
+    pubsub.subscribe(format!("{PREFIX}.control")).await?;
     Ok(pubsub)
 }
 
-/// Route one pub/sub message (centrifuge-framed publication/join/leave or a
-/// Rust cross-node control command).
+/// Route one pub/sub message (centrifuge-framed publication/join/leave, or a
+/// centrifuge control command for cross-node unsubscribe/disconnect).
 fn dispatch_message(msg: &redis::Msg, route: &RouteFn) {
     let topic = msg.get_channel_name();
     let payload: Vec<u8> = match msg.get_payload() {
         Ok(p) => p,
         Err(_) => return,
     };
-    if topic == format!("{PREFIX}.control.rust") {
-        match serde_json::from_slice::<ControlMessage>(&payload) {
-            Ok(cmd) => route(NodeMessage::Control(cmd)),
-            Err(e) => tracing::warn!("redis control decode: {e}"),
+    if topic == format!("{PREFIX}.control") {
+        if let Some(cmd) = decode_control(&payload) {
+            route(NodeMessage::Control(cmd));
         }
         return;
     }
@@ -277,7 +331,10 @@ impl RedisEngine {
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         let pubsub = subscribe(&client).await?;
         tokio::spawn(run_pubsub(pubsub, route));
-        Ok(RedisEngine { mgr })
+        Ok(RedisEngine {
+            mgr,
+            node_uid: uuid::Uuid::new_v4().to_string(),
+        })
     }
 
     /// Connect via Redis Sentinel. The master is resolved at startup, and a
@@ -344,7 +401,10 @@ impl RedisEngine {
                 }
             }
         });
-        Ok(RedisEngine { mgr })
+        Ok(RedisEngine {
+            mgr,
+            node_uid: uuid::Uuid::new_v4().to_string(),
+        })
     }
 
     fn client_key(channel: &str) -> String {
@@ -450,13 +510,11 @@ impl Engine for RedisEngine {
     }
 
     async fn publish_control(&self, msg: ControlMessage) -> anyhow::Result<()> {
-        // Rust-native control channel; every Rust node (incl. this one, via its own
-        // subscriber) applies it.
-        let payload = serde_json::to_vec(&msg)?;
+        // centrifuge control protocol on `<prefix>.control` — every node (Go or
+        // Rust, including this one via its own subscriber) applies it.
+        let payload = encode_control(&self.node_uid, &msg);
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn
-            .publish(format!("{PREFIX}.control.rust"), payload)
-            .await?;
+        let _: () = conn.publish(format!("{PREFIX}.control"), payload).await?;
         Ok(())
     }
 

@@ -36,7 +36,7 @@
 | gRPC API (порт 10000) | ✅ те же 11 RPC, apikey в metadata |
 | Персональные каналы | ✅ `user_subscribe_to_personal` — авто-подписка на `#<user>` |
 | Движки | ✅ Memory (один узел) **и** Redis (мультиузловой), вкл. **Sentinel** с переобнаружением мастера при failover «на лету» |
-| Interop Go ⇄ Rust на Redis | ✅ живой pub/sub **+ история + presence** между Go- и Rust-узлами на одном Redis (wire-формат centrifuge) |
+| Interop Go ⇄ Rust на Redis | ✅ живой pub/sub **+ история + presence + control** (unsubscribe/disconnect) между Go- и Rust-узлами на одном Redis (wire-формат centrifuge) |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену + вендоренный web UI на `/` |
 | Метрики Prometheus (`/metrics`) | ✅ node-gauges + счётчики по командам/сообщениям/транспортам |
 | Конфигурация | ✅ флаги + JSON-файл (`-c`) + env (`CENTRIFUGO_*`) |
@@ -202,11 +202,10 @@ cargo test --workspace
 ## Что осталось за рамками (отложено)
 
 - **Redis Cluster / шардинг.** Поддерживается только одномастерный Redis (напрямую или через Sentinel) — без шардинга по consistent-hash на несколько Redis-шардов.
-- **Межузловой interop control-команд с Go-узлами.** Серверные `unsubscribe`/`disconnect` расходятся по всему кластеру **среди Rust-узлов**, но по Rust-только Redis-каналу (JSON), а не по protobuf-control-протоколу centrifuge — поэтому в *смешанном* Go+Rust кластере до Go-узлов не доходят. (Живой pub/sub, история и presence с Go interop-ятся — они в разделе «Что реализовано».)
 - **Интеграционный тест live-failover Sentinel.** Переобнаружение мастера «на лету» реализовано, но CI-тест с реальным падением мастера требует харнеса с репликой + промоушеном Sentinel (живой сценарий проверен вручную).
 
 ---
 
 ## Статус
 
-Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **190 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.
+Все этапы M0–M12, фазы полного паритета (server-side каналы, SUB_REFRESH, `#`-каналы, TTL presence + таймер обновления, гранулярные прокси, Protobuf HTTP API, разрешение на публикацию, Redis Sentinel, admin web UI) и пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам, живой interop Go⇄Rust на Redis) завершены. **193 теста проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK centrifuge-go. Сквозной adversarial-аудит устранил 40+ расхождений с эталоном на Go.

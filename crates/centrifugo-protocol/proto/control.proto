@@ -1,0 +1,32 @@
+// centrifuge v0.14.2 inter-node control protocol (internal/controlpb/control.proto),
+// stripped of gogoproto codegen options — the wire format (field numbers) is
+// identical, so a Go centrifugo node and a Rust node interoperate on the
+// `<prefix>.control` Redis channel.
+syntax = "proto3";
+
+package controlpb;
+
+enum MethodType {
+    NODE = 0;
+    UNSUBSCRIBE = 1;
+    DISCONNECT = 2;
+}
+
+message Command {
+    string uid = 1;     // origin node id (a node skips its own commands)
+    MethodType method = 2;
+    bytes params = 3;   // encoded sub-message for `method`
+}
+
+message Unsubscribe {
+    string channel = 1;
+    string user = 2;
+}
+
+message Disconnect {
+    string user = 1;
+    repeated string whitelist = 2;
+    uint32 code = 3;
+    string reason = 4;
+    bool reconnect = 5;
+}
