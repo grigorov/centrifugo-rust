@@ -36,11 +36,16 @@ pub struct NodeInfoData {
 pub enum ControlMessage {
     /// Unsubscribe `user`'s connections from `channel` (empty `channel` = all).
     Unsubscribe { user: String, channel: String },
-    /// Disconnect all of `user`'s connections with this code/reason.
+    /// Disconnect all of `user`'s connections with this code/reason. `reconnect`
+    /// tells the client whether to reconnect; `whitelist` holds client IDs to
+    /// spare (centrifuge `controlpb.Disconnect`, used by e.g. Go's
+    /// `user_personal_single_connection`).
     Disconnect {
         user: String,
         code: u32,
         reason: String,
+        reconnect: bool,
+        whitelist: Vec<String>,
     },
     /// A node's periodic info ping (registered in every node's registry).
     Node(NodeInfoData),

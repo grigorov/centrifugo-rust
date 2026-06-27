@@ -578,6 +578,11 @@ impl Node {
                 user: user.to_string(),
                 code,
                 reason: reason.to_string(),
+                // The HTTP/gRPC disconnect API issues DisconnectForceNoReconnect
+                // (3012) and exposes no whitelist; cross-node reconnect/whitelist
+                // arrive via the decode path (a Go node may set them).
+                reconnect: false,
+                whitelist: Vec::new(),
             })
             .await
         {
@@ -599,13 +604,25 @@ fn apply_control(hub: &Hub, registry: &NodeRegistry, cmd: ControlMessage) {
                 }
             }
         }
-        ControlMessage::Disconnect { user, code, reason } => {
+        ControlMessage::Disconnect {
+            user,
+            code,
+            reason,
+            reconnect,
+            whitelist,
+        } => {
             for h in hub.user_clients(&user) {
+                // Spare whitelisted connections (Go hub.go: stringInSlice(c.ID(),
+                // whitelist) → continue). `h.id` is the centrifuge wire client-ID,
+                // the same value a Go node places in the whitelist.
+                if whitelist.contains(&h.id) {
+                    continue;
+                }
                 if let Some(ctrl) = &h.ctrl {
                     let _ = ctrl.try_send(Signal::Disconnect(Disconnect::new(
                         code,
                         reason.clone(),
-                        false,
+                        reconnect,
                     )));
                 }
             }

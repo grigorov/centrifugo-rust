@@ -206,14 +206,20 @@ fn encode_control(node_uid: &str, msg: &ControlMessage) -> Vec<u8> {
             }
             .encode_to_vec(),
         ),
-        ControlMessage::Disconnect { user, code, reason } => (
+        ControlMessage::Disconnect {
+            user,
+            code,
+            reason,
+            reconnect,
+            whitelist,
+        } => (
             controlpb::MethodType::Disconnect as i32,
             controlpb::Disconnect {
                 user: user.clone(),
-                whitelist: Vec::new(),
+                whitelist: whitelist.clone(),
                 code: *code,
                 reason: reason.clone(),
-                reconnect: false,
+                reconnect: *reconnect,
             }
             .encode_to_vec(),
         ),
@@ -258,6 +264,8 @@ fn decode_control(bytes: &[u8]) -> Option<ControlMessage> {
                 user: d.user,
                 code: d.code,
                 reason: d.reason,
+                reconnect: d.reconnect,
+                whitelist: d.whitelist,
             })
         }
         controlpb::MethodType::Node => {
@@ -657,4 +665,59 @@ fn now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_control_roundtrips_whitelist_and_reconnect() {
+        // A Go node (e.g. user_personal_single_connection) sends a Disconnect with
+        // a non-empty whitelist and reconnect=true; both must survive the wire so a
+        // Rust node spares the whitelisted client and tells the rest to reconnect.
+        let msg = ControlMessage::Disconnect {
+            user: "u1".into(),
+            code: 3011,
+            reason: "force reconnect".into(),
+            reconnect: true,
+            whitelist: vec!["client-abc".into(), "client-def".into()],
+        };
+        let bytes = encode_control("node-1", &msg);
+        let decoded = decode_control(&bytes).expect("decodes");
+        match decoded {
+            ControlMessage::Disconnect {
+                user,
+                code,
+                reason,
+                reconnect,
+                whitelist,
+            } => {
+                assert_eq!(user, "u1");
+                assert_eq!(code, 3011);
+                assert_eq!(reason, "force reconnect");
+                assert!(reconnect);
+                assert_eq!(whitelist, vec!["client-abc", "client-def"]);
+            }
+            _ => panic!("expected Disconnect"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_control_roundtrips() {
+        let bytes = encode_control(
+            "node-1",
+            &ControlMessage::Unsubscribe {
+                user: "u2".into(),
+                channel: "news".into(),
+            },
+        );
+        match decode_control(&bytes).expect("decodes") {
+            ControlMessage::Unsubscribe { user, channel } => {
+                assert_eq!(user, "u2");
+                assert_eq!(channel, "news");
+            }
+            _ => panic!("expected Unsubscribe"),
+        }
+    }
 }
