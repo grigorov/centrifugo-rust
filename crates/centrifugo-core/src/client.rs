@@ -284,6 +284,10 @@ impl Client {
         if !anonymous && self.user.is_empty() && !self.node.client_insecure() {
             return vec![Reply::err(cmd.id, Error::permission_denied())];
         }
+        // User-limited channels (`name#u1,u2`): only listed users may subscribe.
+        if !user_allowed(&req.channel, &self.user) {
+            return vec![Reply::err(cmd.id, Error::permission_denied())];
+        }
         // Private ($-prefixed) channels require a valid subscription token whose
         // client + channel match this connection.
         if self.node.is_private(&req.channel) {
@@ -550,6 +554,16 @@ impl Client {
             // Invalid refresh token -> close (3002).
             Err(VerifyError::Invalid) => CommandOutcome::disconnect(Disconnect::invalid_token()),
         }
+    }
+}
+
+/// Whether `user` may subscribe to a user-limited channel (Go `UserAllowed`).
+/// A channel `name#u1,u2` restricts subscription to the comma-separated user
+/// list after the last `#`; channels without `#` are open to everyone.
+fn user_allowed(channel: &str, user: &str) -> bool {
+    match channel.rsplit_once('#') {
+        None => true,
+        Some((_, allowed)) => allowed.split(',').any(|u| u == user),
     }
 }
 
