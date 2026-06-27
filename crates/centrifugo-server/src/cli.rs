@@ -173,4 +173,11 @@ pub struct ServeArgs {
     /// Comma-separated Redis Sentinel addresses (`host:port`).
     #[arg(long = "redis_sentinels", default_value = "")]
     pub redis_sentinels: String,
+    /// Redis password (applied on top of `redis_address`; required for AUTH in
+    /// Sentinel mode where it cannot be carried in the address URL).
+    #[arg(long = "redis_password", default_value = "")]
+    pub redis_password: String,
+    /// Redis database number (`SELECT`); defaults to 0.
+    #[arg(long = "redis_db", default_value_t = 0)]
+    pub redis_db: i64,
 }

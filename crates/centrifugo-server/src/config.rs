@@ -31,6 +31,8 @@ pub struct Settings {
     pub redis_address: String,
     pub redis_master_name: String,
     pub redis_sentinels: String,
+    pub redis_password: String,
+    pub redis_db: i64,
     pub proxy_connect_endpoint: String,
     pub proxy_refresh_endpoint: String,
     pub proxy_subscribe_endpoint: String,
@@ -96,6 +98,7 @@ impl Settings {
                 self.redis_address = v;
             }
         }
+        fill(&mut self.redis_password, "REDIS_PASSWORD");
     }
 
     /// gRPC API bind address — same host as the HTTP listener, `grpc_api_port`.
@@ -127,6 +130,8 @@ impl Settings {
             redis_address: a.redis_address.clone(),
             redis_master_name: a.redis_master_name.clone(),
             redis_sentinels: a.redis_sentinels.clone(),
+            redis_password: a.redis_password.clone(),
+            redis_db: a.redis_db,
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
             proxy_refresh_endpoint: a.proxy_refresh_endpoint.clone(),
             proxy_subscribe_endpoint: a.proxy_subscribe_endpoint.clone(),
@@ -190,6 +195,8 @@ impl Settings {
             redis_address: fc.redis_address,
             redis_master_name: fc.redis_master_name,
             redis_sentinels: fc.redis_sentinels,
+            redis_password: fc.redis_password,
+            redis_db: fc.redis_db,
             proxy_connect_endpoint: fc.proxy_connect_endpoint,
             proxy_refresh_endpoint: fc.proxy_refresh_endpoint,
             proxy_subscribe_endpoint: fc.proxy_subscribe_endpoint,
@@ -331,6 +338,10 @@ struct FileConfig {
     redis_master_name: String,
     #[serde(default)]
     redis_sentinels: String,
+    #[serde(default)]
+    redis_password: String,
+    #[serde(default)]
+    redis_db: i64,
     #[serde(default)]
     proxy_connect_endpoint: String,
     #[serde(default)]

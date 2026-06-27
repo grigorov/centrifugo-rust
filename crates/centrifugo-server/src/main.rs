@@ -197,6 +197,8 @@ async fn main() -> anyhow::Result<()> {
                             &settings.redis_sentinels,
                             make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
+                            Some(settings.redis_password.clone()),
+                            settings.redis_db,
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("connect redis via sentinel: {e}"))?
@@ -206,6 +208,8 @@ async fn main() -> anyhow::Result<()> {
                             &settings.redis_address,
                             make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
+                            Some(settings.redis_password.clone()),
+                            settings.redis_db,
                         )
                         .await
                         .map_err(|e| {

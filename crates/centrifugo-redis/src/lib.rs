@@ -31,8 +31,8 @@ use centrifugo_protocol::{pb, Raw};
 use futures_util::StreamExt;
 use prost::Message as _;
 use redis::aio::ConnectionManager;
-use redis::sentinel::Sentinel;
-use redis::AsyncCommands;
+use redis::sentinel::{Sentinel, SentinelNodeConnectionInfo};
+use redis::{AsyncCommands, IntoConnectionInfo, RedisConnectionInfo};
 use tokio::sync::{Mutex, RwLock};
 const PREFIX: &str = "centrifugo";
 
@@ -194,6 +194,20 @@ pub struct RedisEngine {
     node_uid: String,
 }
 
+/// Sentinel node connection info carrying AUTH/db for the resolved master (Go
+/// authenticates the master from `redis_password`/`redis_db`).
+fn sentinel_node_info(password: &Option<String>, db: i64) -> SentinelNodeConnectionInfo {
+    SentinelNodeConnectionInfo {
+        tls_mode: None,
+        redis_connection_info: Some(RedisConnectionInfo {
+            db,
+            username: None,
+            password: password.clone(),
+            ..Default::default()
+        }),
+    }
+}
+
 /// Encode a control command as centrifuge's `controlpb.Command` (Go interop).
 fn encode_control(node_uid: &str, msg: &ControlMessage) -> Vec<u8> {
     use centrifugo_protocol::controlpb;
@@ -353,13 +367,28 @@ async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn) {
 impl RedisEngine {
     /// Connect to Redis at `addr` (`host:port` or a full `redis://` URL) and spawn
     /// the pub/sub subscriber task that routes incoming messages via `route`.
-    pub async fn connect(addr: &str, route: RouteFn, node_uid: String) -> anyhow::Result<Self> {
+    pub async fn connect(
+        addr: &str,
+        route: RouteFn,
+        node_uid: String,
+        password: Option<String>,
+        db: i64,
+    ) -> anyhow::Result<Self> {
         let url = if addr.contains("://") {
             addr.to_string()
         } else {
             format!("redis://{addr}")
         };
-        let client = redis::Client::open(url)?;
+        // Config `redis_password`/`redis_db` override any creds in the URL (Go
+        // applies them on top of the parsed address).
+        let mut info = url.into_connection_info()?;
+        if let Some(pw) = password.filter(|p| !p.is_empty()) {
+            info.redis.password = Some(pw);
+        }
+        if db != 0 {
+            info.redis.db = db;
+        }
+        let client = redis::Client::open(info)?;
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         let pubsub = subscribe(&client).await?;
         tokio::spawn(run_pubsub(pubsub, route));
@@ -375,6 +404,8 @@ impl RedisEngine {
         sentinels: &str,
         route: RouteFn,
         node_uid: String,
+        password: Option<String>,
+        db: i64,
     ) -> anyhow::Result<Self> {
         let mut addrs: Vec<String> = Vec::new();
         for s in sentinels
@@ -399,8 +430,15 @@ impl RedisEngine {
         if addrs.is_empty() {
             anyhow::bail!("no Sentinel addresses configured");
         }
+        // AUTH/db for the Sentinel-resolved master (Go authenticates the master
+        // from redis_password/redis_db). Without this a password-protected Redis is
+        // unreachable in Sentinel mode (NOAUTH on every command).
+        let password = password.filter(|p| !p.is_empty());
+        let node_info = sentinel_node_info(&password, db);
         let mut sentinel = Sentinel::build(addrs)?;
-        let client = sentinel.async_master_for(master_name, None).await?;
+        let client = sentinel
+            .async_master_for(master_name, Some(&node_info))
+            .await?;
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         // Subscribe synchronously before returning so an immediate publish isn't
         // missed (no startup race); the watchdog re-subscribes on disconnect.
@@ -416,7 +454,13 @@ impl RedisEngine {
             // the pub/sub subscription, and repoint the command manager.
             loop {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                match sentinel.lock().await.async_master_for(&master, None).await {
+                let node_info = sentinel_node_info(&password, db);
+                match sentinel
+                    .lock()
+                    .await
+                    .async_master_for(&master, Some(&node_info))
+                    .await
+                {
                     Ok(client) => {
                         match client.get_connection_manager().await {
                             Ok(m) => *mgr_watch.write().await = m,
