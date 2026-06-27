@@ -94,6 +94,9 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     // also reading client commands.
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
+    // Refresh-proxy connections are renewed proactively before expiry; look ahead
+    // one tick so a token never lapses between checks.
+    let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
     'read: loop {
         let msg = tokio::select! {
             maybe = stream.next() => match maybe {
@@ -102,6 +105,12 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                // Server-side proactive refresh (refresh proxy): renew the token via
+                // the proxy before it lapses; close on expiry / proxy failure.
+                if let Some(d) = client.proactive_refresh(refresh_lookahead).await {
+                    let _ = tx.send(Out::Close(d)).await;
+                    break;
+                }
                 // Disconnect a connection/subscription whose token expired and was
                 // not refreshed within the grace window.
                 if let Some(d) = client.check_expired() {

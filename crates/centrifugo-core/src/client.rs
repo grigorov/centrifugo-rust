@@ -24,9 +24,7 @@ use uuid::Uuid;
 
 use crate::hub::{ClientHandle, ClientId, Out, Signal};
 use crate::node::Node;
-use crate::proxy::{
-    ProxyConnectOutcome, ProxyConnectRequest, ProxyOutcome, ProxyRequest, RefreshProxy,
-};
+use crate::proxy::{ProxyConnectOutcome, ProxyConnectRequest, ProxyOutcome, ProxyRequest};
 
 /// Result of dispatching one command: replies to send, plus an optional
 /// disconnect that closes the connection (with a specific code + reason).
@@ -828,11 +826,14 @@ impl Client {
         if req.token.is_empty() {
             return CommandOutcome::disconnect(Disconnect::bad_request());
         }
-        // With a refresh proxy configured, refresh via the HTTP callback instead
-        // of a JWT (the proxy authenticates by client/user; the token is only the
-        // required non-empty trigger here).
-        if let Some(proxy) = self.node.proxies().refresh.clone() {
-            return self.refresh_via_proxy(cmd.id, proxy.as_ref()).await;
+        // With a refresh proxy configured the connection is server-side-refresh
+        // (Go ClientSideRefresh = !refreshProxyEnabled): the server drives the
+        // proxy proactively (see `proactive_refresh`), so a client REFRESH command
+        // is a protocol violation → DisconnectBadRequest (3003), matching Go
+        // handleRefresh ("client not supposed to send refresh command in case of
+        // server-side refresh mechanism").
+        if self.node.proxies().refresh.is_some() {
+            return CommandOutcome::disconnect(Disconnect::bad_request());
         }
         match self.node.verifier().verify_connect_token(&req.token) {
             Ok(ct) => {
@@ -873,55 +874,47 @@ impl Client {
         }
     }
 
-    /// Connection refresh via the refresh proxy: expired -> DisconnectExpired,
-    /// else update expiry/info and reply (110 if the new expiry is already past).
-    async fn refresh_via_proxy(&mut self, id: u32, proxy: &dyn RefreshProxy) -> CommandOutcome {
+    /// Server-side proactive refresh (Go `expire()` with `!ClientSideRefresh`).
+    /// When a refresh proxy is configured and the connection's token is within
+    /// `lookahead_secs` of expiry, call the proxy to renew it. Returns `Some` to
+    /// close the connection (expired / proxy error / proxy disconnect), or `None`
+    /// when nothing was due or the connection was renewed. Produces no reply —
+    /// there is no client command driving it.
+    pub async fn proactive_refresh(&mut self, lookahead_secs: i64) -> Option<Disconnect> {
+        // Client-side refresh (no proxy): the client renews via its own REFRESH.
+        let proxy = self.node.proxies().refresh.clone()?;
+        if !self.authenticated || self.expire_at <= 0 {
+            return None; // no expiry to renew
+        }
+        if self.expire_at - now_unix() > lookahead_secs {
+            return None; // not due yet
+        }
         match proxy.refresh(self.proxy_request()).await {
             Ok(ProxyOutcome::Result(c)) => {
                 if c.expired {
-                    return CommandOutcome::disconnect(Disconnect::expired());
+                    return Some(Disconnect::expired()); // 3005
                 }
                 if c.info.is_some() {
                     self.conn_info = c.info;
                 }
-                self.expire_at = c.expire_at;
-                let (expires, ttl) = if c.expire_at > 0 {
-                    let ttl = c.expire_at - now_unix();
-                    if ttl <= 0 {
-                        return CommandOutcome::replies(vec![Reply::err(id, Error::expired())]);
+                if c.expire_at > 0 {
+                    self.expire_at = c.expire_at;
+                    // Refreshed into an already-past expiry → expired (Go checkExpired).
+                    if c.expire_at - now_unix() <= 0 {
+                        return Some(Disconnect::expired());
                     }
-                    (true, ttl as u32)
+                    None
                 } else {
-                    (false, 0)
-                };
-                let result = RefreshResult {
-                    client: self.id.clone(),
-                    version: String::new(),
-                    expires,
-                    ttl,
-                };
-                CommandOutcome::replies(vec![ok_reply(self.proto, id, &result)])
+                    // No new expiry and not marked expired: nothing to extend → expired.
+                    Some(Disconnect::expired())
+                }
             }
-            Ok(ProxyOutcome::Error { code, message }) => {
-                CommandOutcome::replies(vec![Reply::err(id, Error::new(code, message))])
-            }
+            // Go's expire() callback: an explicit *Disconnect closes with it; any
+            // other proxy/transport error → DisconnectServerError (3004).
             Ok(ProxyOutcome::Disconnect { code, reason }) => {
-                CommandOutcome::disconnect(Disconnect::new(code, reason, false))
+                Some(Disconnect::new(code, reason, false))
             }
-            // Transport failure: Go's refresh_handler gives the connection one more
-            // minute to live (graceful degradation on a temporary backend hiccup)
-            // rather than erroring the client.
-            Err(_) => {
-                let expire_at = now_unix() + 60;
-                self.expire_at = expire_at;
-                let result = RefreshResult {
-                    client: self.id.clone(),
-                    version: String::new(),
-                    expires: true,
-                    ttl: 60,
-                };
-                CommandOutcome::replies(vec![ok_reply(self.proto, id, &result)])
-            }
+            Ok(ProxyOutcome::Error { .. }) | Err(_) => Some(Disconnect::server_error()),
         }
     }
 
@@ -1105,7 +1098,108 @@ fn encode_position(result: &mut SubscribeResult, offset: u64, use_seq_gen: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::{Proxies, RefreshCreds, RefreshProxy};
+    use async_trait::async_trait;
     use tokio::sync::mpsc;
+
+    /// A refresh proxy that always returns the configured credentials.
+    struct StubRefresh {
+        expire_at: i64,
+        expired: bool,
+    }
+    #[async_trait]
+    impl RefreshProxy for StubRefresh {
+        async fn refresh(&self, _req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RefreshCreds>> {
+            Ok(ProxyOutcome::Result(RefreshCreds {
+                expired: self.expired,
+                expire_at: self.expire_at,
+                info: None,
+            }))
+        }
+    }
+    /// A refresh proxy whose transport always fails.
+    struct ErrRefresh;
+    #[async_trait]
+    impl RefreshProxy for ErrRefresh {
+        async fn refresh(&self, _req: ProxyRequest) -> anyhow::Result<ProxyOutcome<RefreshCreds>> {
+            Err(anyhow::anyhow!("backend down"))
+        }
+    }
+
+    fn node_with_refresh(proxy: Arc<dyn RefreshProxy>) -> Arc<Node> {
+        use crate::engine::Engine;
+        use crate::hub::Hub;
+        use crate::memory::MemoryEngine;
+        use crate::node::{make_route, Namespaces, NodeRegistry};
+        let hub = Arc::new(Hub::new());
+        let registry = Arc::new(NodeRegistry::new("test".into()));
+        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub, &registry, true)));
+        let proxies = Proxies {
+            refresh: Some(proxy),
+            ..Default::default()
+        };
+        Node::new_with_engine(
+            hub,
+            engine,
+            Arc::new(centrifugo_auth::TokenVerifier::default()),
+            true,
+            false,
+            Namespaces::default(),
+            proxies,
+            25,
+            60,
+            registry,
+            "2.8.6".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn proactive_refresh_extends_expires_and_errors() {
+        // Client-side (no proxy): proactive refresh is a no-op.
+        let node = Node::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+        c.authenticated = true;
+        c.expire_at = now_unix() + 5;
+        assert!(c.proactive_refresh(25).await.is_none(), "no proxy → no-op");
+
+        // Proxy extends: a due connection is renewed (expire_at pushed out, no close).
+        let node = node_with_refresh(Arc::new(StubRefresh {
+            expire_at: now_unix() + 3600,
+            expired: false,
+        }));
+        let (tx, _rx) = mpsc::channel(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+        c.authenticated = true;
+        c.expire_at = now_unix() + 5; // within the 25s lookahead → due
+        assert!(c.proactive_refresh(25).await.is_none(), "extend → no close");
+        assert!(c.expire_at > now_unix() + 3000, "expire_at must be extended");
+
+        // Not due yet: a far-future expiry must not call the proxy or change state.
+        c.expire_at = now_unix() + 10_000;
+        let before = c.expire_at;
+        assert!(c.proactive_refresh(25).await.is_none());
+        assert_eq!(c.expire_at, before, "not-due refresh must not change expiry");
+
+        // Proxy says expired → DisconnectExpired (3005).
+        let node = node_with_refresh(Arc::new(StubRefresh {
+            expire_at: 0,
+            expired: true,
+        }));
+        let (tx, _rx) = mpsc::channel(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+        c.authenticated = true;
+        c.expire_at = now_unix() + 5;
+        assert_eq!(c.proactive_refresh(25).await.unwrap().code, 3005);
+
+        // Transport failure → DisconnectServerError (3004).
+        let node = node_with_refresh(Arc::new(ErrRefresh));
+        let (tx, _rx) = mpsc::channel(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+        c.authenticated = true;
+        c.expire_at = now_unix() + 5;
+        assert_eq!(c.proactive_refresh(25).await.unwrap().code, 3004);
+    }
 
     #[tokio::test]
     async fn check_expired_honours_deadline_and_grace() {

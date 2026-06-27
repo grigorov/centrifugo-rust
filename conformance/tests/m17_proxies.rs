@@ -187,7 +187,14 @@ fn now() -> i64 {
 }
 
 #[tokio::test]
-async fn refresh_proxy_extends_and_expires() {
+async fn refresh_command_rejected_in_proxy_mode() {
+    // With a refresh proxy configured, the connection is server-side-refresh
+    // (Go ClientSideRefresh = !refreshProxyEnabled): the server drives the proxy
+    // proactively before expiry, so a *client* REFRESH command is a protocol
+    // violation. Go handleRefresh returns DisconnectBadRequest (3003) — "client
+    // not supposed to send refresh command in case of server-side refresh".
+    // (The proactive server-side renewal itself is covered by the
+    // `proactive_refresh` unit test in centrifugo-core.)
     let url = spawn(format!(r#"{{"result":{{"expire_at":{}}}}}"#, now() + 3600)).await;
     let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{url}"}}"#);
     let s = Server::start_with_config(&cfg).await;
@@ -195,40 +202,13 @@ async fn refresh_proxy_extends_and_expires() {
     c.connect_command().await;
     c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
         .await;
-    let r = c.next_json().await;
-    assert!(r["error"].is_null(), "refresh error: {r}");
-    assert_eq!(r["result"]["expires"], true, "refresh result: {r}");
-
-    // Expired -> DisconnectExpired (3005).
-    let exp_url = spawn(r#"{"result":{"expired":true}}"#.into()).await;
-    let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{exp_url}"}}"#);
-    let s2 = Server::start_with_config(&cfg).await;
-    let mut c2 = WsJsonClient::connect(&s2.ws_url()).await;
-    c2.connect_command().await;
-    c2.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
-        .await;
-    let (code, _) = c2.next_close().await;
-    assert_eq!(code, 3005, "expired refresh proxy must disconnect 3005");
-}
-
-#[tokio::test]
-async fn refresh_proxy_missing_result_disconnects_expired() {
-    // No `result` (no credentials) → Go RefreshReply{Expired:true} → 3005, not a
-    // success reply that would keep the connection alive forever.
-    let url = spawn(r#"{}"#.into()).await;
-    let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{url}"}}"#);
-    let s = Server::start_with_config(&cfg).await;
-    let mut c = WsJsonClient::connect(&s.ws_url()).await;
-    c.connect_command().await;
-    c.send_raw(r#"{"id":2,"method":10,"params":{"token":"t"}}"#)
-        .await;
     let (code, _) = c.next_close().await;
-    assert_eq!(code, 3005, "missing refresh result must disconnect 3005");
+    assert_eq!(code, 3003, "client REFRESH in proxy mode must disconnect 3003");
 }
 
 #[tokio::test]
 async fn refresh_empty_token_disconnects_even_with_proxy() {
-    // Go handleRefresh rejects an empty token (3003) before any handler/proxy.
+    // Go handleRefresh rejects an empty token (3003) before the server-side check.
     let url = spawn(format!(r#"{{"result":{{"expire_at":{}}}}}"#, now() + 3600)).await;
     let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{url}"}}"#);
     let s = Server::start_with_config(&cfg).await;

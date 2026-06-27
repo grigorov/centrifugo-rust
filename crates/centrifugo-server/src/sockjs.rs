@@ -165,6 +165,7 @@ async fn run_session(
     client.set_ctrl(ctrl_tx);
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
+    let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
     loop {
         let raw = tokio::select! {
             maybe = incoming.recv() => match maybe {
@@ -173,6 +174,11 @@ async fn run_session(
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                // Server-side proactive refresh (refresh proxy) before expiry.
+                if let Some(d) = client.proactive_refresh(refresh_lookahead).await {
+                    let _ = reply_tx.send(Out::Close(d)).await;
+                    break;
+                }
                 if let Some(d) = client.check_expired() {
                     let _ = reply_tx.send(Out::Close(d)).await;
                     break;
