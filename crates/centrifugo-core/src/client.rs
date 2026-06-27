@@ -194,6 +194,7 @@ impl Client {
 
     /// Dispatch one command. Returns replies and/or a disconnect.
     pub async fn handle_command(&mut self, cmd: &Command) -> CommandOutcome {
+        self.node.metrics().inc_command(cmd.method as usize);
         // CONNECT must be the first command; otherwise close the connection
         // (Go centrifuge sends DisconnectBadRequest).
         if !self.authenticated && cmd.method != MethodType::Connect {
@@ -327,6 +328,7 @@ impl Client {
         self.conn_info = info;
         self.expire_at = expire_at;
         self.authenticated = true;
+        self.node.metrics().inc_connect(self.transport);
         self.node.hub().add(ClientHandle {
             id: self.id.clone(),
             user: self.user.clone(),

@@ -59,8 +59,10 @@ async fn health() -> Json<serde_json::Value> {
 /// Prometheus text-format metrics. Exposes node gauges from the hub plus build
 /// info. Full per-command counters are a future refinement.
 async fn metrics(State(node): State<Arc<Node>>) -> Response {
+    use centrifugo_core::metrics::{MESSAGE_KINDS, METHOD_NAMES, TRANSPORTS};
     let hub = node.hub();
-    let body = format!(
+    let m = node.metrics();
+    let mut body = format!(
         "# HELP centrifugo_build_info Build information.\n\
          # TYPE centrifugo_build_info gauge\n\
          centrifugo_build_info{{version=\"{version}\"}} 1\n\
@@ -78,6 +80,46 @@ async fn metrics(State(node): State<Arc<Node>>) -> Response {
         users = hub.num_users(),
         channels = hub.num_channels(),
     );
+
+    // Messages fanned out, by kind (Go centrifugo_node_messages_sent_count).
+    let sent = m.messages_sent();
+    body.push_str(
+        "# HELP centrifugo_node_messages_sent_count Number of messages sent.\n\
+         # TYPE centrifugo_node_messages_sent_count counter\n",
+    );
+    for (i, kind) in MESSAGE_KINDS.iter().enumerate() {
+        body.push_str(&format!(
+            "centrifugo_node_messages_sent_count{{type=\"{kind}\"}} {}\n",
+            sent[i]
+        ));
+    }
+
+    // Client commands processed, by method.
+    let cmds = m.commands();
+    body.push_str(
+        "# HELP centrifugo_client_command_count Number of client commands processed.\n\
+         # TYPE centrifugo_client_command_count counter\n",
+    );
+    for (i, name) in METHOD_NAMES.iter().enumerate() {
+        body.push_str(&format!(
+            "centrifugo_client_command_count{{method=\"{name}\"}} {}\n",
+            cmds[i]
+        ));
+    }
+
+    // Connections accepted, by transport (Go centrifugo_transport_connect_count).
+    let conns = m.connects();
+    body.push_str(
+        "# HELP centrifugo_transport_connect_count Number of connections accepted.\n\
+         # TYPE centrifugo_transport_connect_count counter\n",
+    );
+    for (i, t) in TRANSPORTS.iter().enumerate() {
+        body.push_str(&format!(
+            "centrifugo_transport_connect_count{{transport=\"{t}\"}} {}\n",
+            conns[i]
+        ));
+    }
+
     (
         [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
         body,

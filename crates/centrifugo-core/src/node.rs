@@ -161,6 +161,8 @@ pub struct Node {
     id: String,
     /// Unix seconds at node creation; Info `uptime` is derived from it.
     started_unix: i64,
+    /// Prometheus-style counters (commands, messages sent, connects).
+    metrics: Arc<crate::metrics::Metrics>,
     hub: Arc<Hub>,
     engine: Arc<dyn Engine>,
     verifier: Arc<TokenVerifier>,
@@ -202,6 +204,7 @@ impl Node {
         Arc::new(Node {
             id: uuid::Uuid::new_v4().to_string(),
             started_unix: now_unix(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
             hub,
             engine,
             verifier,
@@ -255,6 +258,11 @@ impl Node {
     /// Seconds since this node started (Info `uptime`).
     pub fn uptime(&self) -> u32 {
         (now_unix() - self.started_unix).max(0) as u32
+    }
+
+    /// The Prometheus metrics registry.
+    pub fn metrics(&self) -> &Arc<crate::metrics::Metrics> {
+        &self.metrics
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
@@ -348,12 +356,14 @@ impl Node {
     // ---- join / leave ----
 
     pub async fn publish_join(&self, channel: &str, info: ClientInfo) {
+        self.metrics.inc_message_sent(1);
         if let Err(e) = self.engine.publish_join(channel, info).await {
             tracing::warn!("publish_join({channel}): {e}");
         }
     }
 
     pub async fn publish_leave(&self, channel: &str, info: ClientInfo) {
+        self.metrics.inc_message_sent(2);
         if let Err(e) = self.engine.publish_leave(channel, info).await {
             tracing::warn!("publish_leave({channel}): {e}");
         }
@@ -364,6 +374,7 @@ impl Node {
     /// Publish to a channel: the engine appends to history (when enabled for the
     /// channel) assigning an offset, then fans out the live publication.
     pub async fn publish(&self, channel: &str, data: &[u8], info: Option<ClientInfo>) {
+        self.metrics.inc_message_sent(0);
         let opts = self
             .namespaces
             .channel_options(channel)

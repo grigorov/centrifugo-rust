@@ -6,10 +6,12 @@ pub mod client;
 pub mod engine;
 pub mod hub;
 pub mod memory;
+pub mod metrics;
 pub mod node;
 pub mod proxy;
 
 pub use client::{Client, CommandOutcome};
+pub use metrics::Metrics;
 pub use engine::{ControlMessage, Engine, NodeMessage, PublishOptions, RouteFn};
 pub use hub::{ClientHandle, ClientId, Hub, Out, Signal};
 pub use memory::MemoryEngine;
