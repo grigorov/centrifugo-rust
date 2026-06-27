@@ -165,6 +165,10 @@ async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                if let Some(d) = client.check_expired() {
+                    let _ = reply_tx.send(Out::Close(d)).await;
+                    break;
+                }
                 continue;
             }
         };

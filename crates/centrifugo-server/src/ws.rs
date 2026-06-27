@@ -99,6 +99,12 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                // Disconnect a connection/subscription whose token expired and was
+                // not refreshed within the grace window.
+                if let Some(d) = client.check_expired() {
+                    let _ = tx.send(Out::Close(d)).await;
+                    break;
+                }
                 continue;
             }
         };

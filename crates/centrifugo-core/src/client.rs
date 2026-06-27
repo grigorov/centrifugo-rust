@@ -732,6 +732,29 @@ impl Client {
         }
     }
 
+    /// Periodic expiry check (driven by the transport's timer). In client-side-
+    /// refresh mode, a connection whose token expired (and was not refreshed in
+    /// time) is closed with DisconnectExpired (3005); any subscription whose
+    /// token expired is closed with DisconnectSubExpired (3006). Both honour a
+    /// grace window (Go ClientExpired{,Sub}CloseDelay = 25s) so a client has time
+    /// to send REFRESH / SUB_REFRESH. Returns the disconnect to apply, if any.
+    pub fn check_expired(&self) -> Option<Disconnect> {
+        if !self.authenticated {
+            return None;
+        }
+        const CLOSE_DELAY: i64 = 25;
+        let now = now_unix();
+        if self.expire_at > 0 && now > self.expire_at + CLOSE_DELAY {
+            return Some(Disconnect::expired());
+        }
+        for state in self.subscriptions.values() {
+            if state.expire_at > 0 && now > state.expire_at + CLOSE_DELAY {
+                return Some(Disconnect::sub_expired());
+            }
+        }
+        None
+    }
+
     /// Called when the connection closes: publish Leave + clear presence for all
     /// subscribed channels, then unregister from the hub.
     pub async fn on_disconnect(&mut self) {
@@ -1024,5 +1047,42 @@ fn encode_position(result: &mut SubscribeResult, offset: u64, use_seq_gen: bool)
         result.gen = g;
     } else {
         result.offset = offset;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn check_expired_honours_deadline_and_grace() {
+        let node = Node::new();
+        let (tx, _rx) = mpsc::channel(16);
+        let mut c = node.new_client(tx, ProtocolType::Json);
+
+        // Unauthenticated / no expiry → never expired.
+        assert!(c.check_expired().is_none());
+        c.authenticated = true;
+        assert!(c.check_expired().is_none());
+
+        // Within the grace window (just expired) → not yet closed.
+        c.expire_at = now_unix() - 1;
+        assert!(c.check_expired().is_none(), "must allow the 25s grace window");
+
+        // Past the grace window → DisconnectExpired (3005).
+        c.expire_at = now_unix() - 100;
+        assert_eq!(c.check_expired().unwrap().code, 3005);
+
+        // A subscription expired past grace → DisconnectSubExpired (3006).
+        c.expire_at = 0;
+        c.subscriptions.insert(
+            "ch".into(),
+            SubState {
+                expire_at: now_unix() - 100,
+                ..Default::default()
+            },
+        );
+        assert_eq!(c.check_expired().unwrap().code, 3006);
     }
 }
