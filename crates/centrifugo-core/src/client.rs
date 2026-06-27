@@ -3,6 +3,7 @@
 //! insecure mode. Full method coverage, CONNECT-first disconnect semantics, and
 //! auth arrive in M2/M3.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use centrifugo_auth::VerifyError;
@@ -46,6 +47,28 @@ impl CommandOutcome {
     }
 }
 
+/// Per-subscription state, tracked for each channel the client is subscribed to.
+/// `presence`/`join_leave` are captured at subscribe time so leave/presence
+/// cleanup uses the options in force then; `expire_at`/`chan_info` are populated
+/// from subscription tokens (SUB_REFRESH and private/`$` channels).
+#[derive(Default)]
+// `expire_at`/`chan_info`/`server_side`/`recoverable` are consumed by later
+// phases (SUB_REFRESH, server-side channels, presence-refresh); kept here so the
+// subscription state has its final shape.
+#[allow(dead_code)]
+pub(crate) struct SubState {
+    /// Subscription token expiry (unix seconds); 0 = no expiry.
+    pub expire_at: i64,
+    /// Channel offers recovery.
+    pub recoverable: bool,
+    pub presence: bool,
+    pub join_leave: bool,
+    /// Per-channel info from a subscription token (becomes ClientInfo.chan_info).
+    pub chan_info: Option<Vec<u8>>,
+    /// Subscribed server-side (on connect), not via a client SUBSCRIBE.
+    pub server_side: bool,
+}
+
 pub struct Client {
     pub id: ClientId,
     pub user: String,
@@ -55,8 +78,8 @@ pub struct Client {
     conn_info: Option<Vec<u8>>,
     /// Token expiry (unix seconds); 0 means no expiry.
     expire_at: i64,
-    /// Channels this client is subscribed to (for presence/leave on disconnect).
-    subscriptions: Vec<String>,
+    /// Channels this client is subscribed to → per-subscription state.
+    subscriptions: HashMap<String, SubState>,
     node: Arc<Node>,
     tx: Sender<Out>,
 }
@@ -70,14 +93,14 @@ impl Client {
             authenticated: false,
             conn_info: None,
             expire_at: 0,
-            subscriptions: Vec::new(),
+            subscriptions: HashMap::new(),
             node,
             tx,
         }
     }
 
     fn is_subscribed(&self, channel: &str) -> bool {
-        self.subscriptions.iter().any(|c| c == channel)
+        self.subscriptions.contains_key(channel)
     }
 
     /// Build the ClientInfo for this connection (publisher/presence/join-leave).
@@ -289,9 +312,15 @@ impl Client {
                 .add_presence(&req.channel, &self.id, self.client_info())
                 .await;
         }
-        if !self.subscriptions.iter().any(|c| c == &req.channel) {
-            self.subscriptions.push(req.channel.clone());
-        }
+        self.subscriptions.insert(
+            req.channel.clone(),
+            SubState {
+                presence,
+                join_leave,
+                recoverable: history_recover,
+                ..Default::default()
+            },
+        );
 
         // Recovery (when the channel offers it via history_recover).
         let mut result = SubscribeResult::default();
@@ -401,19 +430,18 @@ impl Client {
     }
 
     async fn unsubscribe_channel(&mut self, channel: &str) {
+        // Use the options captured at subscribe time (a no-op if not subscribed).
+        let Some(state) = self.subscriptions.remove(channel) else {
+            return;
+        };
         self.node.hub().unsubscribe(&self.id, channel);
         let _ = self.node.engine().unsubscribe(channel).await;
-        let (presence, join_leave) = match self.node.channel_options(channel) {
-            Some(o) => (o.presence, o.join_leave),
-            None => (false, false),
-        };
-        if presence {
+        if state.presence {
             self.node.remove_presence(channel, &self.id).await;
         }
-        if join_leave {
+        if state.join_leave {
             self.node.publish_leave(channel, self.client_info()).await;
         }
-        self.subscriptions.retain(|c| c != channel);
     }
 
     async fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -464,15 +492,11 @@ impl Client {
     /// subscribed channels, then unregister from the hub.
     pub async fn on_disconnect(&mut self) {
         let channels = std::mem::take(&mut self.subscriptions);
-        for ch in &channels {
-            let (presence, join_leave) = match self.node.channel_options(ch) {
-                Some(o) => (o.presence, o.join_leave),
-                None => continue,
-            };
-            if presence {
+        for (ch, state) in &channels {
+            if state.presence {
                 self.node.remove_presence(ch, &self.id).await;
             }
-            if join_leave {
+            if state.join_leave {
                 self.node.publish_leave(ch, self.client_info()).await;
             }
         }
