@@ -190,7 +190,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ### What each test file covers
 
-The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **195 tests total, 0 failures.**
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **201 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
 
 **Core wire compatibility — M0–M12**
 
@@ -235,6 +235,34 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 
 ---
 
+## Performance
+
+A comparison of this implementation against the real Centrifugo v2.8.6 (Go) under identical load. The benchmark is `conformance/tests/perf.rs` (marked `#[ignore]`):
+
+```bash
+# release binary — for a fair comparison vs the optimized Go
+cargo build --release -p centrifugo-server
+CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
+  cargo test --test perf -- --ignored --nocapture
+```
+
+Two metrics (identical methodology for both backends, so the *ratio* is what matters, not the absolute numbers):
+
+- **Fan-out throughput** — 100 subscribers on one channel, 500 publishes via the HTTP API → 50,000 deliveries; rate = deliveries / wall-clock.
+- **Broadcast latency** — single subscriber, median/p95 of publish-call → delivery.
+
+Measured on a **MacBook (Apple M4 Pro, 12 cores, 24 GB RAM)**, median of 3 runs, memory engine (single-node fan-out, apples-to-apples):
+
+| Metric | Rust | Go v2.8.6 | Ratio |
+|---|---|---|---|
+| Fan-out, deliveries/s | **~178,000** (100% delivered) | ~65,000 (98.7–99.2%) | **Rust ≈ 2.7× faster** |
+| Broadcast latency, median | **0.13 ms** | 0.20 ms | Rust ≈ 35% lower |
+| Broadcast latency, p95 | **0.14 ms** | 0.38–0.45 ms | Rust ≈ 3× lower |
+
+Under this load Go sheds ~1% of deliveries (slow-consumer protection drops lagging subscribers) while Rust delivers 100%. This is a single-machine microbenchmark — it shows the order-of-magnitude difference, not absolute production numbers.
+
+---
+
 ## Compatibility notes
 
 - **seq/gen by default.** Centrifugo v2.8.6 uses seq/gen, not offset (`v3_use_offset=false`). `offset = gen*MaxUint32 + seq` (asymmetric with the `>>32` unpack — a centrifuge v0.14.2 quirk, replicated verbatim). Recovered publications are returned in descending order (newest first).
@@ -259,4 +287,16 @@ Development ran across stages **M0–M25** (see the test-file breakdown above):
 - **m13–m21** — full Go-parity phases (`#`-channels, SUB_REFRESH, server-side channels, presence TTL, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI).
 - **m22–m25** — adversarial-audit fixes + post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics) and **full Go⇄Rust Redis interop** (pub/sub + history + presence + control + node-info).
 
-All complete: **195 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK; a full adversarial audit resolved 40+ divergences from the Go reference.
+All complete: **201 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
+
+A **second adversarial audit** (after the interop, control, and refresh changes) found 13 real divergences from the Go reference — all fixed, each with a test:
+
+- **B1** — live publications on recoverable channels ship seq/gen (offset zeroed), matching Go's `UseSeqGen` (the v2.8.6 default);
+- **B2** — cross-node Disconnect carries `reconnect` + `whitelist` (load-bearing for `user_personal_single_connection`);
+- **B3** — the refresh proxy is server-side: proactive timer-driven renewal + a client REFRESH is rejected (3003), like Go;
+- **B4** — AUTH/db for the Sentinel-resolved master + `redis_password`/`redis_db` config;
+- **B5** — server-side unsubscribe/disconnect apply locally before publishing + own-uid loopback skip;
+- **B6/B8/B9/B10/B11** — API string/code parity (apikey exactly 2 fields; `rpc` method → 107/104; gRPC message `unauthenticated`; Content-Type echoed; decode_control doc);
+- **B7** — node name = `hostname_port`/config `name` (not the UID);
+- **B12** — control signals are no longer dropped silently + expiry moved off the 25s presence tick onto a dedicated timer;
+- **B13** — `redis_prefix` and `redis_history_meta_ttl` are now configurable.
