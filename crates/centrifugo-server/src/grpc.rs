@@ -273,13 +273,13 @@ impl Centrifugo for GrpcApi {
             error: None,
             result: Some(pb::InfoResult {
                 nodes: vec![pb::NodeResult {
-                    uid: String::new(),
-                    name: String::new(),
+                    uid: self.node.id().to_string(),
+                    name: self.node.id().to_string(),
                     version: VERSION.to_string(),
                     num_clients: hub.num_clients() as u32,
                     num_users: hub.num_users() as u32,
                     num_channels: hub.num_channels() as u32,
-                    uptime: 0,
+                    uptime: self.node.uptime(),
                     metrics: None,
                 }],
             }),
@@ -288,13 +288,19 @@ impl Centrifugo for GrpcApi {
 
     async fn rpc(
         &self,
-        _request: Request<pb::RpcRequest>,
+        request: Request<pb::RpcRequest>,
     ) -> Result<Response<pb::RpcResponse>, Status> {
-        // No server-side RPC handler registered → not available (108).
+        // Go Executor.RPC: empty method -> BadRequest(107); else (no stock RPC
+        // handler registered) -> MethodNotFound(104). Never NotAvailable(108).
+        let (code, message) = if request.into_inner().method.is_empty() {
+            (107, "bad request")
+        } else {
+            (104, "method not found")
+        };
         Ok(Response::new(pb::RpcResponse {
             error: Some(pb::Error {
-                code: 108,
-                message: "not available".into(),
+                code,
+                message: message.into(),
             }),
             result: None,
         }))

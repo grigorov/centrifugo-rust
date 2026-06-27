@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
             };
             let admin_config = admin::AdminConfig {
                 enabled: settings.admin,
+                insecure: settings.admin_insecure,
                 password: settings.admin_password.clone(),
                 secret: settings.admin_secret.clone(),
                 web_path: settings.admin_web_path.clone(),

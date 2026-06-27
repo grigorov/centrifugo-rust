@@ -25,6 +25,9 @@ pub struct ProxyConnectReply {
     pub info: Option<Vec<u8>>,
     /// Unix seconds; 0 = no expiry.
     pub expire_at: i64,
+    /// Server-side channels the proxy granted (Go credentials.Channels →
+    /// ConnectReply.Subscriptions); each is validated + auto-subscribed on connect.
+    pub channels: Vec<String>,
 }
 
 /// What a connect-proxy decided, mirroring centrifugo's proxy connect_handler:
@@ -96,10 +99,12 @@ pub struct PublishData {
     pub data: Option<Vec<u8>>,
 }
 
-/// RPC-proxy result data.
+/// RPC-proxy result data. `data == None` means the proxy returned no data (an
+/// ack-only RPC); the RpcResult then omits `data` (Go nil-vs-present), instead of
+/// emitting an empty payload that breaks JSON encoding.
 #[derive(Default)]
 pub struct RpcData {
-    pub data: Vec<u8>,
+    pub data: Option<Vec<u8>>,
 }
 
 #[async_trait]

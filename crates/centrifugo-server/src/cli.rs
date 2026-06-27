@@ -141,6 +141,10 @@ pub struct ServeArgs {
     /// Enable the admin endpoints.
     #[arg(long = "admin")]
     pub admin: bool,
+    /// Skip admin auth entirely (Go `admin_insecure`): `/admin/auth` returns the
+    /// `insecure` token and `/admin/api` needs no token.
+    #[arg(long = "admin_insecure")]
+    pub admin_insecure: bool,
     /// Admin password (for `POST /admin/auth`).
     #[arg(long = "admin_password", default_value = "")]
     pub admin_password: String,

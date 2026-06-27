@@ -154,6 +154,7 @@ fn create_session(node: &Arc<Node>, sessions: &Sessions, session_id: &str) {
 async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_tx: mpsc::Sender<Out>) {
     let reply_tx = out_tx.clone();
     let mut client = node.new_client(out_tx, ProtocolType::Json);
+    client.set_transport("sockjs");
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
     loop {
@@ -193,6 +194,8 @@ async fn run_session(node: Arc<Node>, mut incoming: mpsc::Receiver<String>, out_
                 }
             }
         }
+        // Server-side-subscription Joins follow the (connect) reply frame.
+        client.flush_pending_joins().await;
         if let Some(d) = disconnect {
             let _ = reply_tx.send(Out::Close(d)).await;
             break;

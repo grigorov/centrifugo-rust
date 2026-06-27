@@ -47,6 +47,21 @@ async fn rpc_proxy_returns_result() {
 }
 
 #[tokio::test]
+async fn rpc_proxy_ack_only_is_success_without_data() {
+    // A proxy that returns no `data` (ack-only RPC) must yield a success reply, not
+    // an ErrorInternal — for JSON clients an empty Raw would break encoding.
+    let url = spawn(r#"{"result":{}}"#.into()).await;
+    let cfg = format!(r#"{{"client_insecure":true,"proxy_rpc_endpoint":"{url}"}}"#);
+    let s = Server::start_with_config(&cfg).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":9,"params":{"method":"ack"}}"#).await;
+    let r = c.next_json().await;
+    assert!(r["error"].is_null(), "ack-only rpc must succeed: {r}");
+    assert!(r["result"]["data"].is_null(), "ack-only rpc has no data: {r}");
+}
+
+#[tokio::test]
 async fn rpc_without_proxy_is_method_not_found() {
     let s = Server::start().await; // insecure, no rpc proxy
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
@@ -54,6 +69,24 @@ async fn rpc_without_proxy_is_method_not_found() {
     c.send_raw(r#"{"id":2,"method":9,"params":{"method":"x"}}"#).await;
     let r = c.next_json().await;
     assert_eq!(r["error"]["code"], 104, "expected method not found: {r}");
+}
+
+// ---- Connect proxy (server-side channels) ----
+
+#[tokio::test]
+async fn connect_proxy_grants_server_side_channels() {
+    // Go builds ConnectReply.Subscriptions from credentials.Channels; the granted
+    // channels must appear in the connect reply's `subs` map.
+    let url = spawn(r#"{"result":{"user":"u42","channels":["news"]}}"#.into()).await;
+    let cfg = format!(r#"{{"proxy_connect_endpoint":"{url}"}}"#);
+    let s = Server::start_with_config(&cfg).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    let v = c.connect_reply().await;
+    assert!(v["error"].is_null(), "connect: {v}");
+    assert!(
+        v["result"]["subs"]["news"].is_object(),
+        "proxy-granted server-side sub missing: {v}"
+    );
 }
 
 // ---- Publish proxy ----
@@ -115,6 +148,22 @@ async fn subscribe_proxy_allows_and_denies() {
     assert_eq!(r["error"]["code"], 1001, "subscribe should be denied: {r}");
 }
 
+#[tokio::test]
+async fn subscribe_proxy_disconnect_closes_connection() {
+    // A subscribe-proxy `disconnect` closes the connection (Go c.close), not a 103
+    // reply on an open socket.
+    let url = spawn(r#"{"disconnect":{"code":4001,"reason":"go away"}}"#.into()).await;
+    let cfg = format!(
+        r#"{{"client_insecure":true,"proxy_subscribe":true,"proxy_subscribe_endpoint":"{url}"}}"#
+    );
+    let s = Server::start_with_config(&cfg).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":1,"params":{"channel":"room"}}"#).await;
+    let (code, _) = c.next_close().await;
+    assert_eq!(code, 4001, "subscribe-proxy disconnect must close with its code");
+}
+
 // ---- Refresh proxy ----
 
 fn now() -> i64 {
@@ -145,4 +194,18 @@ async fn refresh_proxy_extends_and_expires() {
     c2.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
     let (code, _) = c2.next_close().await;
     assert_eq!(code, 3005, "expired refresh proxy must disconnect 3005");
+}
+
+#[tokio::test]
+async fn refresh_proxy_missing_result_disconnects_expired() {
+    // No `result` (no credentials) → Go RefreshReply{Expired:true} → 3005, not a
+    // success reply that would keep the connection alive forever.
+    let url = spawn(r#"{}"#.into()).await;
+    let cfg = format!(r#"{{"client_insecure":true,"proxy_refresh_endpoint":"{url}"}}"#);
+    let s = Server::start_with_config(&cfg).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":10,"params":{}}"#).await;
+    let (code, _) = c.next_close().await;
+    assert_eq!(code, 3005, "missing refresh result must disconnect 3005");
 }

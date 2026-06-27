@@ -54,11 +54,39 @@ fn encoding(protocol: &str) -> &'static str {
     }
 }
 
-/// info/data bytes from a `field` (raw JSON) or its base64 `b64field` sibling.
-fn decode_bytes(raw: Option<Box<RawValue>>, b64: Option<String>) -> Option<Vec<u8>> {
+/// info/data bytes per Go's encoding-gated rule (connect/refresh/subscribe/rpc):
+/// a JSON client uses ONLY the raw `field`; a binary client uses ONLY the base64
+/// `b64field` (malformed base64 → Err, which the caller maps to ErrorInternal).
+fn decode_gated(
+    raw: Option<Box<RawValue>>,
+    b64: Option<String>,
+    protocol: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    if protocol == "protobuf" {
+        match b64 {
+            Some(b) if !b.is_empty() => {
+                Ok(Some(base64::engine::general_purpose::STANDARD.decode(b)?))
+            }
+            _ => Ok(None),
+        }
+    } else {
+        Ok(raw.map(|r| r.get().as_bytes().to_vec()))
+    }
+}
+
+/// Publish data per Go's publish_handler: raw `data` preferred, base64 `b64data`
+/// fallback, encoding-independent (malformed base64 → Err → ErrorInternal). `None`
+/// means the proxy returned no data, so the original payload is kept.
+fn decode_publish_data(
+    raw: Option<Box<RawValue>>,
+    b64: Option<String>,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    if let Some(r) = raw {
+        return Ok(Some(r.get().as_bytes().to_vec()));
+    }
     match b64 {
-        Some(ref b) if !b.is_empty() => base64::engine::general_purpose::STANDARD.decode(b).ok(),
-        _ => raw.map(|r| r.get().as_bytes().to_vec()),
+        Some(b) if !b.is_empty() => Ok(Some(base64::engine::general_purpose::STANDARD.decode(b)?)),
+        _ => Ok(None),
     }
 }
 
@@ -128,6 +156,8 @@ struct ConnectResult {
     info: Option<Box<RawValue>>,
     #[serde(default)]
     b64info: Option<String>,
+    #[serde(default)]
+    channels: Vec<String>,
 }
 
 #[async_trait]
@@ -165,8 +195,9 @@ impl ConnectProxy for HttpConnectProxy {
         };
         Ok(ProxyConnectOutcome::Credentials(ProxyConnectReply {
             user: result.user,
-            info: decode_bytes(result.info, result.b64info),
+            info: decode_gated(result.info, result.b64info, &req.protocol)?,
             expire_at: result.expire_at,
+            channels: result.channels,
         }))
     }
 }
@@ -237,11 +268,18 @@ impl RefreshProxy for HttpRefreshProxy {
                 message: e.message,
             });
         }
-        let r = resp.result.unwrap_or_default();
+        // Go: a missing `result` means no refresh credentials → RefreshReply{Expired:true}
+        // → DisconnectExpired (3005). Distinguish absent from present-but-empty.
+        let Some(r) = resp.result else {
+            return Ok(ProxyOutcome::Result(RefreshCreds {
+                expired: true,
+                ..Default::default()
+            }));
+        };
         Ok(ProxyOutcome::Result(RefreshCreds {
             expired: r.expired,
             expire_at: r.expire_at,
-            info: decode_bytes(r.info, r.b64info),
+            info: decode_gated(r.info, r.b64info, &req.protocol)?,
         }))
     }
 }
@@ -312,7 +350,7 @@ impl SubscribeProxy for HttpSubscribeProxy {
         }
         let r = resp.result.unwrap_or_default();
         Ok(ProxyOutcome::Result(SubscribeCreds {
-            info: decode_bytes(r.info, r.b64info),
+            info: decode_gated(r.info, r.b64info, &req.protocol)?,
         }))
     }
 }
@@ -382,7 +420,7 @@ impl PublishProxy for HttpPublishProxy {
         }
         let r = resp.result.unwrap_or_default();
         Ok(ProxyOutcome::Result(PublishData {
-            data: decode_bytes(r.data, r.b64data),
+            data: decode_publish_data(r.data, r.b64data)?,
         }))
     }
 }
@@ -436,7 +474,7 @@ impl RpcProxy for HttpRpcProxy {
         }
         let r = resp.result.unwrap_or_default();
         Ok(ProxyOutcome::Result(RpcData {
-            data: decode_bytes(r.data, r.b64data).unwrap_or_default(),
+            data: decode_gated(r.data, r.b64data, &req.protocol)?,
         }))
     }
 }

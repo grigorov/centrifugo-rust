@@ -182,18 +182,22 @@ impl RedisEngine {
         sentinels: &str,
         route: RouteFn,
     ) -> anyhow::Result<Self> {
-        let addrs: Vec<String> = sentinels
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                if s.contains("://") {
-                    s.to_string()
-                } else {
-                    format!("redis://{s}")
+        let mut addrs: Vec<String> = Vec::new();
+        for s in sentinels.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if s.contains("://") {
+                addrs.push(s.to_string());
+            } else {
+                // Go validates each Sentinel address with net.SplitHostPort and
+                // fails fast on a malformed (e.g. portless) entry; mirror that.
+                if s.rsplit_once(':').map(|(h, p)| h.is_empty() || p.is_empty()) != Some(false) {
+                    anyhow::bail!("malformed Sentinel address (want host:port): {s}");
                 }
-            })
-            .collect();
+                addrs.push(format!("redis://{s}"));
+            }
+        }
+        if addrs.is_empty() {
+            anyhow::bail!("no Sentinel addresses configured");
+        }
         let mut sentinel = redis::sentinel::Sentinel::build(addrs)?;
         let client = sentinel.async_master_for(master_name, None).await?;
         Self::from_client(client, route).await
@@ -388,7 +392,9 @@ impl Engine for RedisEngine {
         info: ClientInfo,
         ttl_ms: u64,
     ) -> anyhow::Result<()> {
-        let ttl = if ttl_ms == 0 { 60_000 } else { ttl_ms };
+        // Go passes the configured presence TTL straight through (centrifugo's
+        // own default of 60s is applied at the config layer, not here).
+        let ttl = ttl_ms;
         let payload = serde_json::to_vec(&WireInfo::from(info))?;
         let expire_at = now_ms() + ttl;
         let mut conn = self.mgr.clone();

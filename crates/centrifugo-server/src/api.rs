@@ -131,6 +131,8 @@ struct NodeResult {
     num_users: u32,
     num_channels: u32,
     uptime: u32,
+    // Go emits `"metrics":null` (non-omitempty); per-node metrics are not collected.
+    metrics: Option<serde_json::Value>,
 }
 
 /// `POST /api` — apikey-authenticated server API (matches Go's apiKeyAuth).
@@ -157,19 +159,25 @@ pub async fn admin_api_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if !admin.enabled || admin.secret.is_empty() {
+    if !admin.enabled {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let authed = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|s| s.split_once(' '))
-        .is_some_and(|(scheme, val)| {
-            scheme.eq_ignore_ascii_case("token")
-                && centrifugo_auth::verify_admin_token(&admin.secret, val)
-        });
-    if !authed {
-        return StatusCode::UNAUTHORIZED.into_response();
+    // Insecure admin (Go `admin_insecure`) skips token auth entirely.
+    if !admin.insecure {
+        if admin.secret.is_empty() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let authed = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.split_once(' '))
+            .is_some_and(|(scheme, val)| {
+                scheme.eq_ignore_ascii_case("token")
+                    && centrifugo_auth::verify_admin_token(&admin.secret, val)
+            });
+        if !authed {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
     }
     run_api(&node, &headers, &body).await
 }
@@ -430,13 +438,14 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
             id,
             &InfoResult {
                 nodes: vec![NodeResult {
-                    uid: String::new(),
-                    name: String::new(),
+                    uid: node.id().to_string(),
+                    name: node.id().to_string(),
                     version: crate::VERSION.to_string(),
                     num_clients: node.hub().num_clients() as u32,
                     num_users: node.hub().num_users() as u32,
                     num_channels: node.hub().num_channels() as u32,
-                    uptime: 0,
+                    uptime: node.uptime(),
+                    metrics: None,
                 }],
             },
         ),
@@ -559,17 +568,25 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
         pb::MethodType::Info => {
             let hub = node.hub();
             let nodes = vec![pb::NodeResult {
-                uid: String::new(),
-                name: String::new(),
+                uid: node.id().to_string(),
+                name: node.id().to_string(),
                 version: crate::VERSION.to_string(),
                 num_clients: hub.num_clients() as u32,
                 num_users: hub.num_users() as u32,
                 num_channels: hub.num_channels() as u32,
-                uptime: 0,
+                uptime: node.uptime(),
                 metrics: None,
             }];
             reply(None, pb::InfoResult { nodes }.encode_to_vec())
         }
-        pb::MethodType::Rpc => reply(Some(api_err(108, "not available")), Vec::new()),
+        // Go Executor.RPC: empty method -> BadRequest(107); else (no stock handler
+        // registered) -> MethodNotFound(104). Never NotAvailable(108).
+        pb::MethodType::Rpc => {
+            let req = decode!(pb::RpcRequest);
+            if req.method.is_empty() {
+                return reply(Some(api_err(107, "bad request")), Vec::new());
+            }
+            reply(Some(api_err(104, "method not found")), Vec::new())
+        }
     }
 }

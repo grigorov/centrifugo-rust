@@ -37,6 +37,7 @@ pub struct Settings {
     pub proxy_publish_endpoint: String,
     pub proxy_rpc_endpoint: String,
     pub admin: bool,
+    pub admin_insecure: bool,
     pub admin_password: String,
     pub admin_secret: String,
     pub admin_web_path: String,
@@ -129,6 +130,7 @@ impl Settings {
             proxy_publish_endpoint: a.proxy_publish_endpoint.clone(),
             proxy_rpc_endpoint: a.proxy_rpc_endpoint.clone(),
             admin: a.admin,
+            admin_insecure: a.admin_insecure,
             admin_password: a.admin_password.clone(),
             admin_secret: a.admin_secret.clone(),
             admin_web_path: a.admin_web_path.clone(),
@@ -189,6 +191,7 @@ impl Settings {
             proxy_publish_endpoint: fc.proxy_publish_endpoint,
             proxy_rpc_endpoint: fc.proxy_rpc_endpoint,
             admin: fc.admin,
+            admin_insecure: fc.admin_insecure,
             admin_password: fc.admin_password,
             admin_secret: fc.admin_secret,
             admin_web_path: fc.admin_web_path,
@@ -333,6 +336,8 @@ struct FileConfig {
     proxy_rpc_endpoint: String,
     #[serde(default)]
     admin: bool,
+    #[serde(default)]
+    admin_insecure: bool,
     #[serde(default)]
     admin_password: String,
     #[serde(default)]

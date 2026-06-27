@@ -78,6 +78,8 @@ pub struct Client {
     pub id: ClientId,
     pub user: String,
     proto: ProtocolType,
+    /// Transport name reported to proxies ("websocket" or "sockjs").
+    transport: &'static str,
     authenticated: bool,
     /// Connection info bytes from the token (becomes ClientInfo.conn_info).
     conn_info: Option<Vec<u8>>,
@@ -85,6 +87,9 @@ pub struct Client {
     expire_at: i64,
     /// Channels this client is subscribed to → per-subscription state.
     subscriptions: HashMap<String, SubState>,
+    /// Server-side-subscription Joins to publish AFTER the connect reply is
+    /// flushed (Go flushes the reply first, then publishes Join in goroutines).
+    pending_joins: Vec<(String, ClientInfo)>,
     node: Arc<Node>,
     tx: Sender<Out>,
 }
@@ -95,13 +100,30 @@ impl Client {
             id: String::new(),
             user: String::new(),
             proto,
+            transport: "websocket",
             authenticated: false,
             conn_info: None,
             expire_at: 0,
             subscriptions: HashMap::new(),
+            pending_joins: Vec::new(),
             node,
             tx,
         }
+    }
+
+    /// Publish any Joins deferred from server-side subscriptions. The transport
+    /// calls this after flushing a command batch's replies, so a server-side
+    /// channel's Join push never precedes the Connect reply (matches Go ordering).
+    pub async fn flush_pending_joins(&mut self) {
+        for (channel, info) in std::mem::take(&mut self.pending_joins) {
+            self.node.publish_join(&channel, info).await;
+        }
+    }
+
+    /// Override the transport name reported to proxies (SockJS sessions call this;
+    /// WebSocket keeps the default).
+    pub fn set_transport(&mut self, transport: &'static str) {
+        self.transport = transport;
     }
 
     fn is_subscribed(&self, channel: &str) -> bool {
@@ -113,7 +135,7 @@ impl Client {
         ProxyRequest {
             client: self.id.clone(),
             user: self.user.clone(),
-            transport: "websocket".into(),
+            transport: self.transport.into(),
             protocol: match self.proto {
                 ProtocolType::Json => "json".into(),
                 ProtocolType::Protobuf => "protobuf".into(),
@@ -149,9 +171,9 @@ impl Client {
             // CONNECT may itself decide to disconnect (invalid token), so it
             // returns its own outcome.
             MethodType::Connect => self.on_connect(cmd).await,
-            MethodType::Subscribe => CommandOutcome::replies(self.on_subscribe(cmd).await),
+            MethodType::Subscribe => self.on_subscribe(cmd).await,
             MethodType::Publish => self.on_publish(cmd).await,
-            MethodType::Unsubscribe => CommandOutcome::replies(self.on_unsubscribe(cmd).await),
+            MethodType::Unsubscribe => self.on_unsubscribe(cmd).await,
             MethodType::Ping => {
                 CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PingResult {})])
             }
@@ -213,7 +235,7 @@ impl Client {
         } else if let Some(proxy) = self.node.proxies().connect.clone() {
             let preq = ProxyConnectRequest {
                 client: self.id.clone(),
-                transport: "websocket".into(),
+                transport: self.transport.into(),
                 protocol: match self.proto {
                     ProtocolType::Json => "json".into(),
                     ProtocolType::Protobuf => "protobuf".into(),
@@ -221,8 +243,10 @@ impl Client {
                 data: None,
             };
             match proxy.connect(preq).await {
+                // Go builds ConnectReply.Subscriptions from credentials.Channels;
+                // surface them so the server-side-subscribe + 102-validation loop runs.
                 Ok(ProxyConnectOutcome::Credentials(r)) => {
-                    Some((r.user, r.info, r.expire_at, Vec::new()))
+                    Some((r.user, r.info, r.expire_at, r.channels))
                 }
                 // Explicit proxy error -> relay that code/message as an error reply.
                 Ok(ProxyConnectOutcome::Error { code, message }) => {
@@ -331,19 +355,30 @@ impl Client {
             result.epoch = top.epoch;
             encode_position(&mut result, top.offset, self.node.use_seq_gen());
         }
+        // Defer Join until after the connect reply is flushed (see flush_pending_joins).
         if join_leave {
-            self.node.publish_join(channel, self.client_info()).await;
+            self.pending_joins
+                .push((channel.to_string(), self.client_info()));
         }
         result
     }
 
-    async fn on_subscribe(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_subscribe(&mut self, cmd: &Command) -> CommandOutcome {
         let req: SubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
+        // Go validateSubscribeRequest: empty channel -> DisconnectBadRequest (3003).
         if req.channel.is_empty() {
-            return vec![Reply::err(cmd.id, Error::bad_request())];
+            return CommandOutcome::disconnect(Disconnect::bad_request());
+        }
+        // Already subscribed -> ErrorAlreadySubscribed (105), checked before the
+        // namespace/permission logic (matches Go's validateSubscribeRequest order).
+        if self.is_subscribed(&req.channel) {
+            return CommandOutcome::replies(vec![Reply::err(
+                cmd.id,
+                Error::already_subscribed(),
+            )]);
         }
         let (presence, join_leave, history_recover, anonymous, server_side, proxy_subscribe) =
             match self.node.channel_options(&req.channel) {
@@ -355,20 +390,25 @@ impl Client {
                     o.server_side,
                     o.proxy_subscribe,
                 ),
-                None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+                None => {
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::unknown_channel(),
+                    )])
+                }
             };
         // Server-side channels cannot be subscribed to directly by clients.
         if server_side {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         // Anonymous (empty-user) clients need the channel's `anonymous` option,
         // unless the server runs in insecure mode.
         if !anonymous && self.user.is_empty() && !self.node.client_insecure() {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         // User-limited channels (`name#u1,u2`): only listed users may subscribe.
         if !user_allowed(&req.channel, &self.user) {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         // Per-channel info (becomes ClientInfo.chan_info) + subscription expiry,
         // established by the subscription token ($) or the subscribe proxy.
@@ -378,27 +418,33 @@ impl Client {
         // client + channel match this connection.
         if self.node.is_private(&req.channel) {
             if req.token.is_empty() {
-                return vec![Reply::err(cmd.id, Error::permission_denied())];
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
             }
             match self.node.verifier().verify_subscribe_token(&req.token) {
                 Ok(t) => {
                     if t.client != self.id || t.channel != req.channel {
-                        return vec![Reply::err(cmd.id, Error::permission_denied())];
+                        return CommandOutcome::replies(vec![Reply::err(
+                            cmd.id,
+                            Error::permission_denied(),
+                        )]);
                     }
                     chan_info = t.info;
                     sub_expire_at = if t.expire_token_only { 0 } else { t.expire_at };
                 }
                 Err(VerifyError::Expired) => {
-                    return vec![Reply::err(cmd.id, Error::token_expired())]
+                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::token_expired())])
                 }
                 Err(VerifyError::Invalid) => {
-                    return vec![Reply::err(cmd.id, Error::permission_denied())]
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::permission_denied(),
+                    )])
                 }
             }
         } else if proxy_subscribe && !is_user_limited(&req.channel) {
             // Subscribe proxy authorizes (and may attach info to) the subscription.
             let Some(proxy) = self.node.proxies().subscribe.clone() else {
-                return vec![Reply::err(cmd.id, Error::not_available())];
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
             };
             let mut preq = self.proxy_request();
             preq.channel = req.channel.clone();
@@ -406,14 +452,19 @@ impl Client {
             match proxy.subscribe(preq).await {
                 Ok(ProxyOutcome::Result(c)) => chan_info = c.info,
                 Ok(ProxyOutcome::Error { code, message }) => {
-                    return vec![Reply::err(cmd.id, Error::new(code, message))]
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::new(code, message),
+                    )])
                 }
-                // on_subscribe replies (cannot disconnect); a proxy disconnect is
-                // surfaced as a permission-denied reply.
-                Ok(ProxyOutcome::Disconnect { .. }) => {
-                    return vec![Reply::err(cmd.id, Error::permission_denied())]
+                // A subscribe-proxy disconnect closes the connection (Go calls
+                // c.close(disconnect)) with the proxy's code/reason.
+                Ok(ProxyOutcome::Disconnect { code, reason }) => {
+                    return CommandOutcome::disconnect(Disconnect::new(code, reason, false))
                 }
-                Err(_) => return vec![Reply::err(cmd.id, Error::internal())],
+                Err(_) => {
+                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())])
+                }
             }
         }
         self.node.hub().subscribe(&self.id, &req.channel);
@@ -485,7 +536,7 @@ impl Client {
         if join_leave {
             self.node.publish_join(&req.channel, sub_info).await;
         }
-        vec![reply]
+        CommandOutcome::replies(vec![reply])
     }
 
     async fn on_history(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -588,15 +639,17 @@ impl Client {
         CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PublishResult {})])
     }
 
-    async fn on_unsubscribe(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_unsubscribe(&mut self, cmd: &Command) -> CommandOutcome {
         let req: UnsubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
-        if !req.channel.is_empty() {
-            self.unsubscribe_channel(&req.channel).await;
+        // Go handleUnsubscribe: an empty channel is DisconnectBadRequest (3003).
+        if req.channel.is_empty() {
+            return CommandOutcome::disconnect(Disconnect::bad_request());
         }
-        vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})]
+        self.unsubscribe_channel(&req.channel).await;
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &UnsubscribeResult {})])
     }
 
     async fn unsubscribe_channel(&mut self, channel: &str) {
@@ -604,14 +657,18 @@ impl Client {
         let Some(state) = self.subscriptions.remove(channel) else {
             return;
         };
-        self.node.hub().unsubscribe(&self.id, channel);
-        let _ = self.node.engine().unsubscribe(channel).await;
+        // Go order: remove presence + publish Leave (carrying the per-channel
+        // chan_info captured at subscribe time) FIRST, then remove the hub/engine
+        // subscription — so the leaving client still receives its own Leave.
+        let info = self.client_info_with(state.chan_info.clone());
         if state.presence {
             self.node.remove_presence(channel, &self.id).await;
         }
         if state.join_leave {
-            self.node.publish_leave(channel, self.client_info()).await;
+            self.node.publish_leave(channel, info).await;
         }
+        self.node.hub().unsubscribe(&self.id, channel);
+        let _ = self.node.engine().unsubscribe(channel).await;
     }
 
     async fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
@@ -665,10 +722,12 @@ impl Client {
         if !self.authenticated {
             return;
         }
-        let info = self.client_info();
+        // Re-attach each subscription's chan_info (Go updateChannelPresence uses
+        // chCtx.Info); using the bare client_info would erase it on every ping.
         for (channel, state) in &self.subscriptions {
             if state.presence {
-                self.node.add_presence(channel, &self.id, info.clone()).await;
+                let info = self.client_info_with(state.chan_info.clone());
+                self.node.add_presence(channel, &self.id, info).await;
             }
         }
     }
@@ -682,7 +741,8 @@ impl Client {
                 self.node.remove_presence(ch, &self.id).await;
             }
             if state.join_leave {
-                self.node.publish_leave(ch, self.client_info()).await;
+                let info = self.client_info_with(state.chan_info.clone());
+                self.node.publish_leave(ch, info).await;
             }
         }
         self.node.remove(&self.id);
@@ -777,7 +837,20 @@ impl Client {
             Ok(ProxyOutcome::Disconnect { code, reason }) => {
                 CommandOutcome::disconnect(Disconnect::new(code, reason, false))
             }
-            Err(_) => CommandOutcome::replies(vec![Reply::err(id, Error::internal())]),
+            // Transport failure: Go's refresh_handler gives the connection one more
+            // minute to live (graceful degradation on a temporary backend hiccup)
+            // rather than erroring the client.
+            Err(_) => {
+                let expire_at = now_unix() + 60;
+                self.expire_at = expire_at;
+                let result = RefreshResult {
+                    client: self.id.clone(),
+                    version: String::new(),
+                    expires: true,
+                    ttl: 60,
+                };
+                CommandOutcome::replies(vec![ok_reply(self.proto, id, &result)])
+            }
         }
     }
 
@@ -797,8 +870,10 @@ impl Client {
         preq.data = req.data.map(|r| r.as_bytes().to_vec());
         match proxy.rpc(preq).await {
             Ok(ProxyOutcome::Result(d)) => {
+                // Omit `data` when the proxy returned none (ack-only RPC); an empty
+                // Raw breaks JSON encoding (RawValue::from_string("")).
                 let result = RpcResult {
-                    data: Some(Raw::from_bytes(d.data)),
+                    data: d.data.map(Raw::from_bytes),
                 };
                 CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
             }
@@ -840,18 +915,24 @@ impl Client {
                 Error::permission_denied(),
             )]),
         }
+        // Go handleSubRefresh: an empty token is ErrorBadRequest (107) — an in-band
+        // error reply, NOT a disconnect.
+        if req.token.is_empty() {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
+        }
         match self.node.verifier().verify_subscribe_token(&req.token) {
             Ok(t) => {
                 if t.client != self.id || t.channel != req.channel {
                     return CommandOutcome::disconnect(Disconnect::invalid_token());
                 }
                 let expire_at = t.expire_at;
+                // Go's sub-refresh boundary is strict `<`: expire_at == now is NOT
+                // expired (TTL 0, success), unlike connection refresh (`ttl <= 0`).
                 let (expires, ttl) = if expire_at > 0 {
-                    let ttl = expire_at - now_unix();
-                    if ttl <= 0 {
+                    if expire_at < now_unix() {
                         return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::expired())]);
                     }
-                    (true, ttl as u32)
+                    (true, (expire_at - now_unix()).max(0) as u32)
                 } else {
                     (false, 0)
                 };

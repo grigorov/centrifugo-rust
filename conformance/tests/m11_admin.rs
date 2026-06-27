@@ -10,19 +10,19 @@ async fn admin_auth_issues_token_that_authorizes_api() {
             .await;
     let client = reqwest::Client::new();
 
-    // Wrong password is rejected.
+    // Wrong password is rejected with 400 (Go authHandler form auth).
     let bad = client
         .post(format!("{}/admin/auth", s.http))
-        .body(r#"{"password":"nope"}"#)
+        .form(&[("password", "nope")])
         .send()
         .await
         .unwrap();
-    assert_eq!(bad.status().as_u16(), 401);
+    assert_eq!(bad.status().as_u16(), 400);
 
-    // Correct password yields a token.
+    // Correct password (x-www-form-urlencoded, as the SPA posts) yields a token.
     let ok = client
         .post(format!("{}/admin/auth", s.http))
-        .body(r#"{"password":"pw"}"#)
+        .form(&[("password", "pw")])
         .send()
         .await
         .unwrap();
@@ -63,4 +63,29 @@ async fn admin_auth_issues_token_that_authorizes_api() {
         .await
         .unwrap();
     assert_eq!(main_api.status().as_u16(), 401, "admin token must not work on /api");
+}
+
+#[tokio::test]
+async fn admin_insecure_skips_auth() {
+    let s = Server::start_with_config(r#"{"admin":true,"admin_insecure":true}"#).await;
+    let client = reqwest::Client::new();
+
+    // Insecure mode: /admin/auth returns the literal `insecure` token, no password.
+    let auth = client
+        .post(format!("{}/admin/auth", s.http))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(auth.status().as_u16(), 200);
+    let body: serde_json::Value = auth.json().await.unwrap();
+    assert_eq!(body["token"], "insecure", "insecure token: {body}");
+
+    // /admin/api works with no credential in insecure mode.
+    let api = client
+        .post(format!("{}/admin/api", s.http))
+        .body(r#"{"method":"info","params":{}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(api.status().as_u16(), 200, "insecure admin api must be open");
 }

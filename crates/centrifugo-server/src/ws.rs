@@ -139,6 +139,9 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
                 }
             }
         }
+        // Publish any server-side-subscription Joins now that the (connect) reply
+        // frame is enqueued, so the client sees its Connect reply before the Join.
+        client.flush_pending_joins().await;
         if let Some(d) = disconnect {
             let _ = tx.send(Out::Close(d)).await;
             break 'read;

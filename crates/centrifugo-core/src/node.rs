@@ -133,6 +133,10 @@ pub(crate) fn now_unix() -> i64 {
 }
 
 pub struct Node {
+    /// Stable per-process node id (Go node UID); reported by the Info API.
+    id: String,
+    /// Unix seconds at node creation; Info `uptime` is derived from it.
+    started_unix: i64,
     hub: Arc<Hub>,
     engine: Arc<dyn Engine>,
     verifier: Arc<TokenVerifier>,
@@ -172,6 +176,8 @@ impl Node {
         presence_expire_secs: u64,
     ) -> Arc<Self> {
         Arc::new(Node {
+            id: uuid::Uuid::new_v4().to_string(),
+            started_unix: now_unix(),
             hub,
             engine,
             verifier,
@@ -215,6 +221,16 @@ impl Node {
             true,
             Namespaces::default(),
         )
+    }
+
+    /// Stable per-process node id (Go node UID).
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Seconds since this node started (Info `uptime`).
+    pub fn uptime(&self) -> u32 {
+        (now_unix() - self.started_unix).max(0) as u32
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
