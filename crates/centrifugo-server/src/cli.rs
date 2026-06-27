@@ -147,6 +147,9 @@ pub struct ServeArgs {
     /// Admin session token secret.
     #[arg(long = "admin_secret", default_value = "")]
     pub admin_secret: String,
+    /// Serve the admin web UI from this directory (empty = embedded bundle).
+    #[arg(long = "admin_web_path", default_value = "")]
+    pub admin_web_path: String,
     /// Engine backing pub/sub, history and presence: `memory` or `redis`.
     #[arg(long = "engine", default_value = "memory")]
     pub engine: String,

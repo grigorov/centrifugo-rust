@@ -39,6 +39,7 @@ pub struct Settings {
     pub admin: bool,
     pub admin_password: String,
     pub admin_secret: String,
+    pub admin_web_path: String,
     pub namespaces: Namespaces,
 }
 
@@ -130,6 +131,7 @@ impl Settings {
             admin: a.admin,
             admin_password: a.admin_password.clone(),
             admin_secret: a.admin_secret.clone(),
+            admin_web_path: a.admin_web_path.clone(),
             namespaces: Namespaces {
                 default: ChannelOptions {
                     presence: a.presence,
@@ -189,6 +191,7 @@ impl Settings {
             admin: fc.admin,
             admin_password: fc.admin_password,
             admin_secret: fc.admin_secret,
+            admin_web_path: fc.admin_web_path,
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -334,6 +337,8 @@ struct FileConfig {
     admin_password: String,
     #[serde(default)]
     admin_secret: String,
+    #[serde(default)]
+    admin_web_path: String,
     #[serde(flatten)]
     options: ChannelOptionsCfg,
     #[serde(default = "default_ns_boundary")]

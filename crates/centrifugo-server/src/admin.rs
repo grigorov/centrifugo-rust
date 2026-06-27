@@ -15,6 +15,9 @@ pub struct AdminConfig {
     pub enabled: bool,
     pub password: String,
     pub secret: String,
+    /// Filesystem path to serve the admin UI from (Go `admin_web_path`); empty =
+    /// use the embedded bundle.
+    pub web_path: String,
 }
 
 #[derive(Deserialize, Default)]

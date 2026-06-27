@@ -8,6 +8,7 @@ mod grpc;
 mod http;
 mod proxy_http;
 mod sockjs;
+mod webui;
 mod ws;
 
 use std::sync::Arc;
@@ -171,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
                 enabled: settings.admin,
                 password: settings.admin_password.clone(),
                 secret: settings.admin_secret.clone(),
+                web_path: settings.admin_web_path.clone(),
             };
             let grpc = settings
                 .grpc_api

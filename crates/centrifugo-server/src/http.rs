@@ -13,10 +13,11 @@ use serde_json::json;
 use crate::admin::{self, AdminConfig};
 use crate::api::{self, ApiAuth};
 use crate::sockjs::{self, Sessions};
+use crate::webui;
 use crate::ws;
 
 pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/admin/auth", post(admin::admin_auth))
@@ -35,7 +36,18 @@ pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> 
         .route(
             "/connection/sockjs/:server/:session/xhr_send",
             post(sockjs::xhr_send).options(sockjs::options),
-        )
+        );
+
+    // Admin web UI served at the root when admin is enabled.
+    if admin_config.enabled {
+        router = router
+            .route("/", get(webui::index))
+            .route("/bundle.js", get(webui::bundle_js))
+            .route("/styles.css", get(webui::styles_css))
+            .route("/favicon.png", get(webui::favicon_png));
+    }
+
+    router
         .layer(Extension(api_auth))
         .layer(Extension(admin_config))
         .layer(Extension(Sessions::default()))
