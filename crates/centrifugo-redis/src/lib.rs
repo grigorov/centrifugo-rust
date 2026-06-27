@@ -37,59 +37,7 @@ use redis::aio::ConnectionManager;
 use redis::sentinel::Sentinel;
 use tokio::sync::{Mutex, RwLock};
 use redis::AsyncCommands;
-use serde::{Deserialize, Serialize};
-
 const PREFIX: &str = "centrifugo";
-
-/// ClientInfo as carried over Redis (bytes instead of inline-JSON `Raw`).
-#[derive(Default, Serialize, Deserialize)]
-struct WireInfo {
-    user: String,
-    client: String,
-    conn_info: Vec<u8>,
-    chan_info: Vec<u8>,
-}
-
-impl From<ClientInfo> for WireInfo {
-    fn from(ci: ClientInfo) -> Self {
-        WireInfo {
-            user: ci.user,
-            client: ci.client,
-            conn_info: ci.conn_info.map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
-            chan_info: ci.chan_info.map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
-        }
-    }
-}
-
-impl From<WireInfo> for ClientInfo {
-    fn from(w: WireInfo) -> Self {
-        let opt = |b: Vec<u8>| if b.is_empty() { None } else { Some(Raw::from_bytes(b)) };
-        ClientInfo {
-            user: w.user,
-            client: w.client,
-            conn_info: opt(w.conn_info),
-            chan_info: opt(w.chan_info),
-        }
-    }
-}
-
-/// A publication's payload as stored in history / carried over pub/sub.
-#[derive(Default, Serialize, Deserialize)]
-struct PubData {
-    data: Vec<u8>,
-    info: Option<WireInfo>,
-}
-
-impl PubData {
-    fn into_publication(self, offset: u64) -> Publication {
-        Publication {
-            data: Some(Raw::from_bytes(self.data)),
-            info: self.info.map(Into::into),
-            offset,
-            ..Default::default()
-        }
-    }
-}
 
 // ---- centrifuge-compatible pub/sub wire format (Go interop) ----
 //
@@ -144,49 +92,88 @@ fn extract_push(data: &[u8]) -> (u8, u64, &[u8]) {
     (0, 0, data)
 }
 
-/// Atomic history append: HINCRBY offset, set epoch if absent, RPUSH+LTRIM, then
-/// expire ONLY the list with the history lifetime. KEYS[1]=meta KEYS[2]=list;
-/// ARGV: 1=payload 2=size 3=candidate_epoch 4=list_ttl_ms.
-///
-/// The meta hash (offset+epoch) is deliberately NOT expired with the list: Go
-/// expires the publication list on `history_lifetime` but keeps the meta (top
-/// offset + epoch) until the separate `redis_history_meta_ttl`, which defaults
-/// to 0 (never). Expiring the meta with the list would reset epoch/offset and
-/// make a caught-up client recover=false after an idle window.
-const HIST_ADD: &str = r#"
-local offset = redis.call('hincrby', KEYS[1], 'offset', 1)
-local epoch = redis.call('hget', KEYS[1], 'epoch')
-if not epoch or epoch == false then
-  epoch = ARGV[3]
-  redis.call('hset', KEYS[1], 'epoch', epoch)
+// The Lua scripts below are byte-for-byte centrifuge v0.14.2 (list-mode history +
+// presence) so a Go centrifugo node and a Rust node share the exact same on-Redis
+// format. Meta fields are `s` (offset) and `e` (epoch = redis server time secs).
+
+/// List-history append (centrifuge addHistorySource). KEYS[1]=list KEYS[2]=meta;
+/// ARGV: 1=message 2=ltrim-right-bound(size-1) 3=list-ttl-secs 4=publish-channel
+/// 5=meta-ttl-secs. Stores `__<offset>__<message>` (LPUSH, newest-first) AND
+/// publishes the same framed payload.
+const ADD_HISTORY: &str = r#"
+redis.replicate_commands()
+local epoch
+if redis.call('exists', KEYS[2]) ~= 0 then
+  epoch = redis.call("hget", KEYS[2], "e")
 end
-redis.call('rpush', KEYS[2], ARGV[1])
-local size = tonumber(ARGV[2])
-redis.call('ltrim', KEYS[2], -size, -1)
-local ttl = tonumber(ARGV[4])
-redis.call('pexpire', KEYS[2], ttl)
+if epoch == false or epoch == nil then
+  epoch = redis.call('time')[1]
+  redis.call("hset", KEYS[2], "e", epoch)
+end
+local offset = redis.call("hincrby", KEYS[2], "s", 1)
+if ARGV[5] ~= '0' then
+	redis.call("expire", KEYS[2], ARGV[5])
+end
+local payload = "__" .. offset .. "__" .. ARGV[1]
+redis.call("lpush", KEYS[1], payload)
+redis.call("ltrim", KEYS[1], 0, ARGV[2])
+redis.call("expire", KEYS[1], ARGV[3])
+if ARGV[4] ~= '' then
+	redis.call("publish", ARGV[4], payload)
+end
 return {offset, epoch}
 "#;
 
-/// Presence add: HSET data + ZADD exp + PEXPIRE both. KEYS[1]=data KEYS[2]=exp;
-/// ARGV: 1=clientID 2=info 3=expire_at_ms 4=ttl_ms.
-const PRESENCE_ADD: &str = r#"
-redis.call('hset', KEYS[1], ARGV[1], ARGV[2])
-redis.call('zadd', KEYS[2], ARGV[3], ARGV[1])
-local ttl = tonumber(ARGV[4])
-redis.call('pexpire', KEYS[1], ttl)
-redis.call('pexpire', KEYS[2], ttl)
+/// History read (centrifuge historySource). KEYS[1]=list KEYS[2]=meta;
+/// ARGV: 1=include-pubs 2=list-right-bound 3=meta-ttl-secs. Returns {offset, epoch, pubs}.
+const HISTORY: &str = r#"
+redis.replicate_commands()
+local offset = redis.call("hget", KEYS[2], "s")
+local epoch
+if redis.call('exists', KEYS[2]) ~= 0 then
+  epoch = redis.call("hget", KEYS[2], "e")
+end
+if epoch == false or epoch == nil then
+  epoch = redis.call('time')[1]
+  redis.call("hset", KEYS[2], "e", epoch)
+end
+if ARGV[3] ~= '0' then
+	redis.call("expire", KEYS[2], ARGV[3])
+end
+local pubs = nil
+if ARGV[1] ~= "0" then
+	pubs = redis.call("lrange", KEYS[1], 0, ARGV[2])
+end
+return {offset, epoch, pubs}
 "#;
 
-/// Presence read: prune entries whose exp score <= now, then return the data
-/// hash. KEYS[1]=exp zset KEYS[2]=data hash; ARGV[1]=now_ms.
+/// Presence add (centrifuge addPresenceSource). KEYS[1]=expire-zset KEYS[2]=data-hash;
+/// ARGV: 1=key-ttl-secs 2=expire-at-secs 3=clientID 4=info(protobuf ClientInfo).
+const PRESENCE_ADD: &str = r#"
+redis.call("zadd", KEYS[1], ARGV[2], ARGV[3])
+redis.call("hset", KEYS[2], ARGV[3], ARGV[4])
+redis.call("expire", KEYS[1], ARGV[1])
+redis.call("expire", KEYS[2], ARGV[1])
+"#;
+
+/// Presence remove (centrifuge remPresenceSource). KEYS[1]=expire-zset KEYS[2]=data-hash;
+/// ARGV[1]=clientID.
+const PRESENCE_REM: &str = r#"
+redis.call("hdel", KEYS[2], ARGV[1])
+redis.call("zrem", KEYS[1], ARGV[1])
+"#;
+
+/// Presence read (centrifuge presenceSource). KEYS[1]=expire-zset KEYS[2]=data-hash;
+/// ARGV[1]=now-secs. Prunes expired members, returns HGETALL of the data hash.
 const PRESENCE_READ: &str = r#"
-local expired = redis.call('zrangebyscore', KEYS[1], 0, ARGV[1])
-for i=1,#expired do
-  redis.call('zrem', KEYS[1], expired[i])
-  redis.call('hdel', KEYS[2], expired[i])
+local expired = redis.call("zrangebyscore", KEYS[1], "0", ARGV[1])
+if #expired > 0 then
+  for num = 1, #expired do
+    redis.call("hdel", KEYS[2], expired[num])
+  end
+  redis.call("zremrangebyscore", KEYS[1], "0", ARGV[1])
 end
-return redis.call('hgetall', KEYS[2])
+return redis.call("hgetall", KEYS[2])
 "#;
 
 pub struct RedisEngine {
@@ -343,16 +330,16 @@ impl RedisEngine {
         format!("{PREFIX}.client.{channel}")
     }
     fn meta_key(channel: &str) -> String {
-        format!("{PREFIX}.hist.meta.{channel}")
+        format!("{PREFIX}.list.meta.{channel}")
     }
     fn list_key(channel: &str) -> String {
-        format!("{PREFIX}.hist.list.{channel}")
+        format!("{PREFIX}.list.{channel}")
     }
     fn presence_data_key(channel: &str) -> String {
         format!("{PREFIX}.presence.data.{channel}")
     }
-    fn presence_exp_key(channel: &str) -> String {
-        format!("{PREFIX}.presence.exp.{channel}")
+    fn presence_set_key(channel: &str) -> String {
+        format!("{PREFIX}.presence.expire.{channel}")
     }
 
     /// Publish raw framed bytes to a channel's centrifuge message channel.
@@ -362,39 +349,38 @@ impl RedisEngine {
         Ok(())
     }
 
-    /// Read the full retained history + top position, ensuring the stream has a
-    /// stable epoch (created lazily, like the memory engine).
+    /// Read the full retained history + top position via centrifuge's historySource
+    /// (the meta epoch is created lazily from the Redis server clock, like Go).
+    /// Each list element is `__<offset>__<protobuf Publication>`; returned ascending.
     async fn read_history(&self, channel: &str) -> anyhow::Result<(Vec<Publication>, StreamPosition)> {
         let mut conn = self.mgr.read().await.clone();
-        let meta_key = Self::meta_key(channel);
-        // Ensure an epoch exists so recovery against an empty stream is stable.
-        let candidate = new_epoch();
-        let _: () = redis::cmd("HSETNX")
-            .arg(&meta_key)
-            .arg("epoch")
-            .arg(&candidate)
-            .query_async(&mut conn)
-            .await?;
-        let meta: HashMap<String, String> = conn.hgetall(&meta_key).await?;
-        let top_offset: u64 = meta.get("offset").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let epoch = meta.get("epoch").cloned().unwrap_or(candidate);
-
-        let list: Vec<Vec<u8>> = conn.lrange(Self::list_key(channel), 0, -1).await?;
-        let len = list.len() as u64;
-        // Each element's absolute offset is its distance from the tail (newest ==
-        // top_offset). `saturating_sub` guards the pathological case where the
-        // meta and list desynced (e.g. independent key eviction) and top_offset <
-        // len — better a clamped offset than an integer underflow panic.
-        let pubs = list
+        let (offset, epoch, pubs): (Option<u64>, Option<String>, Option<Vec<Vec<u8>>>) =
+            redis::Script::new(HISTORY)
+                .key(Self::list_key(channel))
+                .key(Self::meta_key(channel))
+                .arg(1) // include publications
+                .arg(-1) // whole list
+                .arg(0) // meta TTL: never (Go redis_history_meta_ttl default)
+                .invoke_async(&mut conn)
+                .await?;
+        let top_offset = offset.unwrap_or(0);
+        let epoch = epoch.unwrap_or_default();
+        let mut publications: Vec<Publication> = pubs
+            .unwrap_or_default()
             .into_iter()
-            .enumerate()
-            .map(|(i, raw)| {
-                let pd: PubData = serde_json::from_slice(&raw).unwrap_or_default();
-                let offset = top_offset.saturating_sub(len - 1 - i as u64);
-                pd.into_publication(offset)
+            .filter_map(|raw| {
+                let (_, off, body) = extract_push(&raw);
+                pb::Publication::decode(body).ok().map(|p| Publication {
+                    data: Some(Raw::from_bytes(p.data)),
+                    info: p.info.map(from_pb_info),
+                    offset: off,
+                    ..Default::default()
+                })
             })
             .collect();
-        Ok((pubs, StreamPosition { offset: top_offset, epoch }))
+        // LPUSH stores newest-first; return ascending by offset (callers order).
+        publications.sort_by_key(|p| p.offset);
+        Ok((publications, StreamPosition { offset: top_offset, epoch }))
     }
 }
 
@@ -407,31 +393,30 @@ impl Engine for RedisEngine {
         info: Option<ClientInfo>,
         opts: PublishOptions,
     ) -> anyhow::Result<()> {
-        if opts.history_enabled() {
-            let entry = serde_json::to_vec(&PubData {
-                data: data.to_vec(),
-                info: info.clone().map(Into::into),
-            })?;
-            let ttl_ms = (opts.history_lifetime as i64) * 1000;
-            let mut conn = self.mgr.read().await.clone();
-            let _: redis::Value = redis::Script::new(HIST_ADD)
-                .key(Self::meta_key(channel))
-                .key(Self::list_key(channel))
-                .arg(entry)
-                .arg(opts.history_size)
-                .arg(new_epoch())
-                .arg(ttl_ms)
-                .invoke_async(&mut conn)
-                .await?;
-        }
-        // Live publication: raw protobuf Publication (offset 0, position carried via
-        // history) — centrifuge-compatible so a Go node receives it.
-        let pub_pb = pb::Publication {
+        // Live publication = protobuf Publication (centrifuge-compatible).
+        let payload = pb::Publication {
             data: data.to_vec(),
             info: info.as_ref().map(to_pb_info),
             ..Default::default()
-        };
-        self.publish_frame(channel, pub_pb.encode_to_vec()).await
+        }
+        .encode_to_vec();
+        if opts.history_enabled() {
+            // The add-Lua stores `__<offset>__<payload>` AND publishes the same
+            // framed bytes (one atomic op) — so we do NOT publish separately.
+            let mut conn = self.mgr.read().await.clone();
+            let _: redis::Value = redis::Script::new(ADD_HISTORY)
+                .key(Self::list_key(channel))
+                .key(Self::meta_key(channel))
+                .arg(payload)
+                .arg(opts.history_size.saturating_sub(1)) // Go list ltrim bound = size-1
+                .arg(opts.history_lifetime) // list TTL (seconds)
+                .arg(Self::client_key(channel)) // publish channel
+                .arg(0) // meta TTL: never
+                .invoke_async(&mut conn)
+                .await?;
+            return Ok(());
+        }
+        self.publish_frame(channel, payload).await
     }
 
     async fn publish_control(&self, msg: ControlMessage) -> anyhow::Result<()> {
@@ -499,19 +484,19 @@ impl Engine for RedisEngine {
         info: ClientInfo,
         ttl_ms: u64,
     ) -> anyhow::Result<()> {
-        // Go passes the configured presence TTL straight through (centrifugo's
-        // own default of 60s is applied at the config layer, not here).
-        let ttl = ttl_ms;
-        let payload = serde_json::to_vec(&WireInfo::from(info))?;
-        let expire_at = now_ms() + ttl;
+        // centrifuge works in seconds: key TTL + expire-at score. (TTL 0 -> the
+        // entry expires immediately, matching Go's pass-through of a 0 config.)
+        let ttl_secs = ttl_ms / 1000;
+        let payload = to_pb_info(&info).encode_to_vec();
+        let expire_at = now_secs() + ttl_secs;
         let mut conn = self.mgr.read().await.clone();
         let _: () = redis::Script::new(PRESENCE_ADD)
+            .key(Self::presence_set_key(channel))
             .key(Self::presence_data_key(channel))
-            .key(Self::presence_exp_key(channel))
+            .arg(ttl_secs)
+            .arg(expire_at)
             .arg(client_id)
             .arg(payload)
-            .arg(expire_at)
-            .arg(ttl)
             .invoke_async(&mut conn)
             .await?;
         Ok(())
@@ -519,32 +504,30 @@ impl Engine for RedisEngine {
 
     async fn remove_presence(&self, channel: &str, client_id: &str) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn
-            .hdel(Self::presence_data_key(channel), client_id)
-            .await?;
-        let _: () = conn
-            .zrem(Self::presence_exp_key(channel), client_id)
+        let _: () = redis::Script::new(PRESENCE_REM)
+            .key(Self::presence_set_key(channel))
+            .key(Self::presence_data_key(channel))
+            .arg(client_id)
+            .invoke_async(&mut conn)
             .await?;
         Ok(())
     }
 
     async fn presence(&self, channel: &str) -> anyhow::Result<HashMap<String, ClientInfo>> {
         let mut conn = self.mgr.read().await.clone();
-        // Prune expired entries (by the exp zset) then read the survivors,
-        // atomically. Returns a flat [field, value, field, value, ...] array.
+        // Prune expired (by the expire zset) then HGETALL the data hash, atomically.
+        // Returns a flat [clientID, protobuf ClientInfo, ...] array.
         let flat: Vec<Vec<u8>> = redis::Script::new(PRESENCE_READ)
-            .key(Self::presence_exp_key(channel))
+            .key(Self::presence_set_key(channel))
             .key(Self::presence_data_key(channel))
-            .arg(now_ms())
+            .arg(now_secs())
             .invoke_async(&mut conn)
             .await?;
         let mut out = HashMap::new();
         let mut it = flat.into_iter();
         while let (Some(k), Some(v)) = (it.next(), it.next()) {
-            if let (Ok(client), Ok(w)) =
-                (String::from_utf8(k), serde_json::from_slice::<WireInfo>(&v))
-            {
-                out.insert(client, w.into());
+            if let (Ok(client), Ok(ci)) = (String::from_utf8(k), pb::ClientInfo::decode(&v[..])) {
+                out.insert(client, from_pb_info(ci));
             }
         }
         Ok(out)
@@ -559,15 +542,11 @@ impl Engine for RedisEngine {
     }
 }
 
-/// Current unix time in milliseconds (presence expiry scores).
-fn now_ms() -> u64 {
+/// Current unix time in seconds (centrifuge presence expiry scores + key TTLs).
+fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-/// Opaque per-stream epoch token (stability + change-on-recreate matter).
-fn new_epoch() -> String {
-    uuid::Uuid::new_v4().simple().to_string()[..10].to_string()
-}
