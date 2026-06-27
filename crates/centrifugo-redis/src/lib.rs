@@ -30,8 +30,9 @@ use centrifugo_core::engine::{ControlMessage, Engine, NodeMessage, PublishOption
 use centrifugo_core::node::StreamPosition;
 use centrifugo_core::RouteFn;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
-use centrifugo_protocol::Raw;
+use centrifugo_protocol::{pb, Raw};
 use futures_util::StreamExt;
+use prost::Message as _;
 use redis::aio::ConnectionManager;
 use redis::sentinel::Sentinel;
 use tokio::sync::{Mutex, RwLock};
@@ -90,30 +91,57 @@ impl PubData {
     }
 }
 
-/// Pub/sub envelope. `t`: 0 = Publication, 1 = Join, 2 = Leave.
-#[derive(Serialize, Deserialize)]
-struct Envelope {
-    t: u8,
-    p: PubData,
+// ---- centrifuge-compatible pub/sub wire format (Go interop) ----
+//
+// Live messages on `<prefix>.client.<ch>` use centrifuge v0.14.2's framing so a
+// Go centrifugo node and a Rust node can share one Redis for live fan-out:
+//   - Publication: raw protobuf `Publication` bytes (a `__<offset>__` prefix when
+//     history-tracked; we emit live messages without it, offset 0).
+//   - Join:  `__j__` + protobuf `ClientInfo`.
+//   - Leave: `__l__` + protobuf `ClientInfo`.
+// (History/presence/control remain Rust-native — see the module note.)
+
+fn to_pb_info(ci: &ClientInfo) -> pb::ClientInfo {
+    pb::ClientInfo {
+        user: ci.user.clone(),
+        client: ci.client.clone(),
+        conn_info: ci.conn_info.as_ref().map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
+        chan_info: ci.chan_info.as_ref().map(|r| r.as_bytes().to_vec()).unwrap_or_default(),
+    }
 }
 
-impl Envelope {
-    fn into_node_message(self, channel: String) -> NodeMessage {
-        match self.t {
-            1 => NodeMessage::Join {
-                channel,
-                info: self.p.info.unwrap_or_default().into(),
-            },
-            2 => NodeMessage::Leave {
-                channel,
-                info: self.p.info.unwrap_or_default().into(),
-            },
-            _ => NodeMessage::Publication {
-                channel,
-                publication: self.p.into_publication(0),
-            },
+fn from_pb_info(pi: pb::ClientInfo) -> ClientInfo {
+    let opt = |b: Vec<u8>| if b.is_empty() { None } else { Some(Raw::from_bytes(b)) };
+    ClientInfo {
+        user: pi.user,
+        client: pi.client,
+        conn_info: opt(pi.conn_info),
+        chan_info: opt(pi.chan_info),
+    }
+}
+
+/// centrifuge `extractPushData`: a `__`-prefixed frame carries a join (`j`),
+/// leave (`l`), or offset marker; otherwise the bytes are a raw Publication.
+/// Returns `(kind, offset, body)` with kind 0=pub, 1=join, 2=leave.
+fn extract_push(data: &[u8]) -> (u8, u64, &[u8]) {
+    if let Some(rest) = data.strip_prefix(b"__") {
+        if let Some(pos) = rest.windows(2).position(|w| w == b"__") {
+            let marker = &rest[..pos];
+            let body = &rest[pos + 2..];
+            return match marker {
+                b"j" => (1, 0, body),
+                b"l" => (2, 0, body),
+                _ => {
+                    let offset = std::str::from_utf8(marker)
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    (0, offset, body)
+                }
+            };
         }
     }
+    (0, 0, data)
 }
 
 /// Atomic history append: HINCRBY offset, set epoch if absent, RPUSH+LTRIM, then
@@ -166,34 +194,64 @@ pub struct RedisEngine {
     mgr: Arc<RwLock<ConnectionManager>>,
 }
 
-/// Subscribe a fresh pub/sub connection to the publication pattern + control channel.
+/// Subscribe a fresh pub/sub connection to the message pattern + control channel.
+/// Uses centrifuge's `<prefix>.client.*` so a Go node's publications are received.
 async fn subscribe(client: &redis::Client) -> anyhow::Result<redis::aio::PubSub> {
     let mut pubsub = client.get_async_pubsub().await?;
-    pubsub.psubscribe(format!("{PREFIX}.pub.*")).await?;
-    pubsub.subscribe(format!("{PREFIX}.control")).await?;
+    pubsub.psubscribe(format!("{PREFIX}.client.*")).await?;
+    // Rust-native control channel (distinct from Go's `<prefix>.control`, whose
+    // protobuf control protocol is not interop-supported).
+    pubsub.subscribe(format!("{PREFIX}.control.rust")).await?;
     Ok(pubsub)
 }
 
-/// Route one pub/sub message (publication envelope or cross-node control command).
+/// Route one pub/sub message (centrifuge-framed publication/join/leave or a
+/// Rust cross-node control command).
 fn dispatch_message(msg: &redis::Msg, route: &RouteFn) {
     let topic = msg.get_channel_name();
     let payload: Vec<u8> = match msg.get_payload() {
         Ok(p) => p,
         Err(_) => return,
     };
-    if topic == format!("{PREFIX}.control") {
+    if topic == format!("{PREFIX}.control.rust") {
         match serde_json::from_slice::<ControlMessage>(&payload) {
             Ok(cmd) => route(NodeMessage::Control(cmd)),
             Err(e) => tracing::warn!("redis control decode: {e}"),
         }
         return;
     }
-    let Some(channel) = topic.strip_prefix(&format!("{PREFIX}.pub.")) else {
+    let Some(channel) = topic.strip_prefix(&format!("{PREFIX}.client.")) else {
         return;
     };
-    match serde_json::from_slice::<Envelope>(&payload) {
-        Ok(env) => route(env.into_node_message(channel.to_string())),
-        Err(e) => tracing::warn!("redis pubsub decode {channel}: {e}"),
+    let channel = channel.to_string();
+    let (kind, offset, body) = extract_push(&payload);
+    match kind {
+        1 => match pb::ClientInfo::decode(body) {
+            Ok(ci) => route(NodeMessage::Join {
+                channel,
+                info: from_pb_info(ci),
+            }),
+            Err(e) => tracing::warn!("redis join decode {channel}: {e}"),
+        },
+        2 => match pb::ClientInfo::decode(body) {
+            Ok(ci) => route(NodeMessage::Leave {
+                channel,
+                info: from_pb_info(ci),
+            }),
+            Err(e) => tracing::warn!("redis leave decode {channel}: {e}"),
+        },
+        _ => match pb::Publication::decode(body) {
+            Ok(p) => route(NodeMessage::Publication {
+                channel,
+                publication: Publication {
+                    data: Some(Raw::from_bytes(p.data)),
+                    info: p.info.map(from_pb_info),
+                    offset,
+                    ..Default::default()
+                },
+            }),
+            Err(e) => tracing::warn!("redis pub decode {channel}: {e}"),
+        },
     }
 }
 
@@ -281,8 +339,8 @@ impl RedisEngine {
         Ok(RedisEngine { mgr })
     }
 
-    fn pub_key(channel: &str) -> String {
-        format!("{PREFIX}.pub.{channel}")
+    fn client_key(channel: &str) -> String {
+        format!("{PREFIX}.client.{channel}")
     }
     fn meta_key(channel: &str) -> String {
         format!("{PREFIX}.hist.meta.{channel}")
@@ -297,10 +355,10 @@ impl RedisEngine {
         format!("{PREFIX}.presence.exp.{channel}")
     }
 
-    async fn publish_envelope(&self, channel: &str, env: &Envelope) -> anyhow::Result<()> {
-        let payload = serde_json::to_vec(env)?;
+    /// Publish raw framed bytes to a channel's centrifuge message channel.
+    async fn publish_frame(&self, channel: &str, payload: Vec<u8>) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn.publish(Self::pub_key(channel), payload).await?;
+        let _: () = conn.publish(Self::client_key(channel), payload).await?;
         Ok(())
     }
 
@@ -366,46 +424,37 @@ impl Engine for RedisEngine {
                 .invoke_async(&mut conn)
                 .await?;
         }
-        // Live publication carries no position (matches the memory engine / Go).
-        let env = Envelope {
-            t: 0,
-            p: PubData {
-                data: data.to_vec(),
-                info: info.map(Into::into),
-            },
+        // Live publication: raw protobuf Publication (offset 0, position carried via
+        // history) — centrifuge-compatible so a Go node receives it.
+        let pub_pb = pb::Publication {
+            data: data.to_vec(),
+            info: info.as_ref().map(to_pb_info),
+            ..Default::default()
         };
-        self.publish_envelope(channel, &env).await
+        self.publish_frame(channel, pub_pb.encode_to_vec()).await
     }
 
     async fn publish_control(&self, msg: ControlMessage) -> anyhow::Result<()> {
-        // Publish to the control channel; every node (including this one, via its
-        // own subscriber) applies it.
+        // Rust-native control channel; every Rust node (incl. this one, via its own
+        // subscriber) applies it.
         let payload = serde_json::to_vec(&msg)?;
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn.publish(format!("{PREFIX}.control"), payload).await?;
+        let _: () = conn.publish(format!("{PREFIX}.control.rust"), payload).await?;
         Ok(())
     }
 
     async fn publish_join(&self, channel: &str, info: ClientInfo) -> anyhow::Result<()> {
-        let env = Envelope {
-            t: 1,
-            p: PubData {
-                data: Vec::new(),
-                info: Some(info.into()),
-            },
-        };
-        self.publish_envelope(channel, &env).await
+        // centrifuge join frame: `__j__` + protobuf ClientInfo.
+        let mut frame = b"__j__".to_vec();
+        frame.extend_from_slice(&to_pb_info(&info).encode_to_vec());
+        self.publish_frame(channel, frame).await
     }
 
     async fn publish_leave(&self, channel: &str, info: ClientInfo) -> anyhow::Result<()> {
-        let env = Envelope {
-            t: 2,
-            p: PubData {
-                data: Vec::new(),
-                info: Some(info.into()),
-            },
-        };
-        self.publish_envelope(channel, &env).await
+        // centrifuge leave frame: `__l__` + protobuf ClientInfo.
+        let mut frame = b"__l__".to_vec();
+        frame.extend_from_slice(&to_pb_info(&info).encode_to_vec());
+        self.publish_frame(channel, frame).await
     }
 
     async fn subscribe(&self, _channel: &str) -> anyhow::Result<()> {

@@ -301,6 +301,7 @@ dependencies = [
  "centrifugo-core",
  "centrifugo-protocol",
  "futures-util",
+ "prost",
  "redis",
  "serde",
  "serde_json",
