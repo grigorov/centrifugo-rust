@@ -159,13 +159,15 @@ async fn run_session(
     out_tx: mpsc::Sender<Out>,
 ) {
     let reply_tx = out_tx.clone();
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Signal>(16);
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Signal>(crate::ws::CTRL_QUEUE);
     let mut client = node.new_client(out_tx, ProtocolType::Json);
     client.set_transport("sockjs");
     client.set_ctrl(ctrl_tx);
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
     let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
+    let mut expiry = tokio::time::interval(crate::ws::EXPIRY_CHECK_INTERVAL);
+    expiry.tick().await; // consume the immediate first tick
     loop {
         let raw = tokio::select! {
             maybe = incoming.recv() => match maybe {
@@ -174,6 +176,9 @@ async fn run_session(
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                continue;
+            }
+            _ = expiry.tick() => {
                 // Server-side proactive refresh (refresh proxy) before expiry.
                 if let Some(d) = client.proactive_refresh(refresh_lookahead).await {
                     let _ = reply_tx.send(Out::Close(d)).await;

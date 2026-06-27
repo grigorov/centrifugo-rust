@@ -17,7 +17,15 @@ use centrifugo_protocol::Disconnect;
 use futures_util::{SinkExt, StreamExt};
 
 const WRITE_QUEUE: usize = 256;
+/// Reader-task control-signal queue (server-side unsubscribe/disconnect). Sized
+/// well above the number a single in-flight command batch could enqueue so control
+/// signals are not dropped under burst.
+pub(crate) const CTRL_QUEUE: usize = 64;
 const PING_INTERVAL: Duration = Duration::from_secs(25);
+/// How often a connection's token expiry is checked (and proxy-refreshed). Shorter
+/// than the presence interval so a lapsed token is closed promptly (Go arms a
+/// per-connection timer at the expiry deadline; we poll at this resolution).
+pub(crate) const EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_MESSAGE_SIZE: usize = 65536; // 64KB, matching centrifuge default
 
 pub async fn ws_handler(
@@ -49,7 +57,7 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Out>(WRITE_QUEUE);
     // Reader-task control channel for server-side unsubscribe/disconnect.
-    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Signal>(16);
+    let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel::<Signal>(CTRL_QUEUE);
     let mut client = node.new_client(tx.clone(), proto);
     client.set_ctrl(ctrl_tx);
 
@@ -94,9 +102,12 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
     // also reading client commands.
     let mut presence = tokio::time::interval(node.presence_ping_interval());
     presence.tick().await; // consume the immediate first tick
-    // Refresh-proxy connections are renewed proactively before expiry; look ahead
-    // one tick so a token never lapses between checks.
+    // Expiry/refresh are checked on their own (faster) timer, decoupled from the
+    // presence ping. Look ahead one presence interval so a refresh-proxy token is
+    // renewed before it lapses.
     let refresh_lookahead = node.presence_ping_interval().as_secs() as i64;
+    let mut expiry = tokio::time::interval(EXPIRY_CHECK_INTERVAL);
+    expiry.tick().await; // consume the immediate first tick
     'read: loop {
         let msg = tokio::select! {
             maybe = stream.next() => match maybe {
@@ -105,14 +116,17 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
             },
             _ = presence.tick() => {
                 client.refresh_presence().await;
+                continue;
+            }
+            _ = expiry.tick() => {
                 // Server-side proactive refresh (refresh proxy): renew the token via
                 // the proxy before it lapses; close on expiry / proxy failure.
                 if let Some(d) = client.proactive_refresh(refresh_lookahead).await {
                     let _ = tx.send(Out::Close(d)).await;
                     break;
                 }
-                // Disconnect a connection/subscription whose token expired and was
-                // not refreshed within the grace window.
+                // Close a connection/subscription whose token expired and was not
+                // refreshed within the grace window.
                 if let Some(d) = client.check_expired() {
                     let _ = tx.send(Out::Close(d)).await;
                     break;

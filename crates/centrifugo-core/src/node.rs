@@ -607,7 +607,12 @@ fn apply_control(hub: &Hub, registry: &NodeRegistry, cmd: ControlMessage) {
         ControlMessage::Unsubscribe { user, channel } => {
             for h in hub.user_clients(&user) {
                 if let Some(ctrl) = &h.ctrl {
-                    let _ = ctrl.try_send(Signal::Unsubscribe(channel.clone()));
+                    // Go applies control synchronously; we signal the reader task. A
+                    // full queue is rare (and a Disconnect breaks the loop anyway),
+                    // but never drop silently — log so it is observable.
+                    if ctrl.try_send(Signal::Unsubscribe(channel.clone())).is_err() {
+                        tracing::warn!("dropped unsubscribe signal for client {}", h.id);
+                    }
                 }
             }
         }
@@ -626,11 +631,16 @@ fn apply_control(hub: &Hub, registry: &NodeRegistry, cmd: ControlMessage) {
                     continue;
                 }
                 if let Some(ctrl) = &h.ctrl {
-                    let _ = ctrl.try_send(Signal::Disconnect(Disconnect::new(
-                        code,
-                        reason.clone(),
-                        reconnect,
-                    )));
+                    if ctrl
+                        .try_send(Signal::Disconnect(Disconnect::new(
+                            code,
+                            reason.clone(),
+                            reconnect,
+                        )))
+                        .is_err()
+                    {
+                        tracing::warn!("dropped disconnect signal for client {}", h.id);
+                    }
                 }
             }
         }
