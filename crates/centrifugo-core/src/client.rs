@@ -299,13 +299,20 @@ impl Client {
 
         // Anonymous/insecure fallback to an empty-user connection when no
         // identity was established; otherwise reject.
-        let (user, info, expire_at, channels) = match creds {
+        let (user, info, expire_at, mut channels) = match creds {
             Some(c) => c,
             None if self.node.client_anonymous() || self.node.client_insecure() => {
                 (String::new(), None, 0, Vec::new())
             }
             None => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
+
+        // Personal channel auto-subscription (Go user_subscribe_to_personal).
+        if let Some(pc) = self.node.personal_channel(&user) {
+            if !channels.contains(&pc) {
+                channels.push(pc);
+            }
+        }
 
         // Pre-validate server-side channels (from the token) before registering:
         // an unknown namespace fails the connect with UnknownChannel(102), matching

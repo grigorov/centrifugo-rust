@@ -152,6 +152,8 @@ impl Settings {
                 namespaces: HashMap::new(),
                 namespace_boundary: ":".into(),
                 private_prefix: "$".into(),
+                user_subscribe_to_personal: a.user_subscribe_to_personal,
+                user_personal_channel_namespace: a.user_personal_channel_namespace.clone(),
             },
         }
     }
@@ -200,6 +202,8 @@ impl Settings {
                 namespaces,
                 namespace_boundary: fc.channel_namespace_boundary,
                 private_prefix: fc.channel_private_prefix,
+                user_subscribe_to_personal: fc.user_subscribe_to_personal,
+                user_personal_channel_namespace: fc.user_personal_channel_namespace,
             },
         })
     }
@@ -350,6 +354,10 @@ struct FileConfig {
     channel_namespace_boundary: String,
     #[serde(default = "default_private_prefix")]
     channel_private_prefix: String,
+    #[serde(default)]
+    user_subscribe_to_personal: bool,
+    #[serde(default)]
+    user_personal_channel_namespace: String,
     #[serde(default)]
     namespaces: Vec<NamespaceCfg>,
 }

@@ -65,6 +65,12 @@ pub struct ServeArgs {
     /// Allow tokenless connections with an empty user id (Go `client_anonymous`).
     #[arg(long = "client_anonymous")]
     pub client_anonymous: bool,
+    /// Auto-subscribe non-anonymous clients to their personal channel on connect.
+    #[arg(long = "user_subscribe_to_personal")]
+    pub user_subscribe_to_personal: bool,
+    /// Namespace for the personal channel (empty = top-level `#<user>`).
+    #[arg(long = "user_personal_channel_namespace", default_value = "")]
+    pub user_personal_channel_namespace: String,
     /// HMAC secret for HS256/384/512 connection tokens.
     #[arg(long = "token_hmac_secret_key", default_value = "")]
     pub token_hmac_secret_key: String,

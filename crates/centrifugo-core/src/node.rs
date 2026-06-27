@@ -79,6 +79,10 @@ pub struct Namespaces {
     pub namespaces: HashMap<String, ChannelOptions>,
     pub namespace_boundary: String,
     pub private_prefix: String,
+    /// Auto-subscribe non-anonymous clients to their personal channel on connect.
+    pub user_subscribe_to_personal: bool,
+    /// Namespace for the personal channel (empty = top-level `#<user>`).
+    pub user_personal_channel_namespace: String,
 }
 
 impl Default for Namespaces {
@@ -88,6 +92,8 @@ impl Default for Namespaces {
             namespaces: HashMap::new(),
             namespace_boundary: ":".into(),
             private_prefix: "$".into(),
+            user_subscribe_to_personal: false,
+            user_personal_channel_namespace: String::new(),
         }
     }
 }
@@ -110,6 +116,24 @@ impl Namespaces {
     /// Whether `channel` is a private (token-protected) channel.
     pub fn is_private(&self, channel: &str) -> bool {
         !self.private_prefix.is_empty() && channel.starts_with(&self.private_prefix)
+    }
+
+    /// The personal channel for `user` (Go `PersonalChannel`): `#<user>`, or
+    /// `<namespace>:#<user>` when a personal-channel namespace is configured.
+    /// `None` when personal subscriptions are disabled or `user` is empty.
+    pub fn personal_channel(&self, user: &str) -> Option<String> {
+        if !self.user_subscribe_to_personal || user.is_empty() {
+            return None;
+        }
+        // ChannelUserBoundary is "#".
+        if self.user_personal_channel_namespace.is_empty() {
+            Some(format!("#{user}"))
+        } else {
+            Some(format!(
+                "{}{}#{user}",
+                self.user_personal_channel_namespace, self.namespace_boundary
+            ))
+        }
     }
 }
 
@@ -266,6 +290,11 @@ impl Node {
     /// Whether `channel` is private (token-protected, `$`-prefixed).
     pub fn is_private(&self, channel: &str) -> bool {
         self.namespaces.is_private(channel)
+    }
+
+    /// The personal channel to auto-subscribe `user` to on connect, if enabled.
+    pub fn personal_channel(&self, user: &str) -> Option<String> {
+        self.namespaces.personal_channel(user)
     }
 
     pub fn use_seq_gen(&self) -> bool {
