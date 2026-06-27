@@ -22,6 +22,8 @@
 //! goldens already pin the client-facing bytes.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use centrifugo_core::engine::{ControlMessage, Engine, NodeMessage, PublishOptions};
@@ -31,6 +33,8 @@ use centrifugo_protocol::messages::{ClientInfo, Publication};
 use centrifugo_protocol::Raw;
 use futures_util::StreamExt;
 use redis::aio::ConnectionManager;
+use redis::sentinel::Sentinel;
+use tokio::sync::{Mutex, RwLock};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 
@@ -158,7 +162,47 @@ return redis.call('hgetall', KEYS[2])
 "#;
 
 pub struct RedisEngine {
-    mgr: ConnectionManager,
+    /// Swappable so the Sentinel watchdog can repoint commands at a new master.
+    mgr: Arc<RwLock<ConnectionManager>>,
+}
+
+/// Subscribe a fresh pub/sub connection to the publication pattern + control channel.
+async fn subscribe(client: &redis::Client) -> anyhow::Result<redis::aio::PubSub> {
+    let mut pubsub = client.get_async_pubsub().await?;
+    pubsub.psubscribe(format!("{PREFIX}.pub.*")).await?;
+    pubsub.subscribe(format!("{PREFIX}.control")).await?;
+    Ok(pubsub)
+}
+
+/// Route one pub/sub message (publication envelope or cross-node control command).
+fn dispatch_message(msg: &redis::Msg, route: &RouteFn) {
+    let topic = msg.get_channel_name();
+    let payload: Vec<u8> = match msg.get_payload() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    if topic == format!("{PREFIX}.control") {
+        match serde_json::from_slice::<ControlMessage>(&payload) {
+            Ok(cmd) => route(NodeMessage::Control(cmd)),
+            Err(e) => tracing::warn!("redis control decode: {e}"),
+        }
+        return;
+    }
+    let Some(channel) = topic.strip_prefix(&format!("{PREFIX}.pub.")) else {
+        return;
+    };
+    match serde_json::from_slice::<Envelope>(&payload) {
+        Ok(env) => route(env.into_node_message(channel.to_string())),
+        Err(e) => tracing::warn!("redis pubsub decode {channel}: {e}"),
+    }
+}
+
+/// Drain a pub/sub connection until it ends (a disconnect), routing each message.
+async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn) {
+    let mut stream = pubsub.into_on_message();
+    while let Some(msg) = stream.next().await {
+        dispatch_message(&msg, &route);
+    }
 }
 
 impl RedisEngine {
@@ -170,13 +214,17 @@ impl RedisEngine {
         } else {
             format!("redis://{addr}")
         };
-        Self::from_client(redis::Client::open(url)?, route).await
+        let client = redis::Client::open(url)?;
+        let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
+        let pubsub = subscribe(&client).await?;
+        tokio::spawn(run_pubsub(pubsub, route));
+        Ok(RedisEngine { mgr })
     }
 
-    /// Connect via Redis Sentinel: resolve the current master for `master_name`
-    /// from the `sentinels` (comma-separated `host:port`), then connect to it.
-    /// (Mid-flight failover re-resolution is a refinement; the master is resolved
-    /// at startup here.)
+    /// Connect via Redis Sentinel. The master is resolved at startup, and a
+    /// watchdog task re-resolves it via Sentinel on every pub/sub disconnect —
+    /// rebuilding the pub/sub subscription AND swapping the command manager — so a
+    /// mid-flight failover is handled without a restart.
     pub async fn connect_sentinel(
         master_name: &str,
         sentinels: &str,
@@ -198,47 +246,38 @@ impl RedisEngine {
         if addrs.is_empty() {
             anyhow::bail!("no Sentinel addresses configured");
         }
-        let mut sentinel = redis::sentinel::Sentinel::build(addrs)?;
+        let mut sentinel = Sentinel::build(addrs)?;
         let client = sentinel.async_master_for(master_name, None).await?;
-        Self::from_client(client, route).await
-    }
+        let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
+        // Subscribe synchronously before returning so an immediate publish isn't
+        // missed (no startup race); the watchdog re-subscribes on disconnect.
+        let pubsub = subscribe(&client).await?;
 
-    /// Common setup: a multiplexed command manager + a pub/sub subscriber task.
-    async fn from_client(client: redis::Client, route: RouteFn) -> anyhow::Result<Self> {
-        let mgr = client.get_connection_manager().await?;
-
-        let mut pubsub = client.get_async_pubsub().await?;
-        let pattern = format!("{PREFIX}.pub.*");
-        pubsub.psubscribe(&pattern).await?;
-        let control_key = format!("{PREFIX}.control");
-        pubsub.subscribe(&control_key).await?;
-        let topic_prefix = format!("{PREFIX}.pub.");
+        let sentinel = Arc::new(Mutex::new(sentinel));
+        let master = master_name.to_string();
+        let mgr_watch = mgr.clone();
         tokio::spawn(async move {
-            let mut stream = pubsub.into_on_message();
-            while let Some(msg) = stream.next().await {
-                let topic = msg.get_channel_name().to_string();
-                let payload: Vec<u8> = match msg.get_payload() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                // Cross-node control command (server-side unsubscribe/disconnect).
-                if topic == control_key {
-                    match serde_json::from_slice::<ControlMessage>(&payload) {
-                        Ok(cmd) => route(NodeMessage::Control(cmd)),
-                        Err(e) => tracing::warn!("redis control decode: {e}"),
+            // First run uses the already-subscribed connection.
+            run_pubsub(pubsub, route.clone()).await;
+            // On disconnect (e.g. master failover), re-resolve via Sentinel, rebuild
+            // the pub/sub subscription, and repoint the command manager.
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                match sentinel.lock().await.async_master_for(&master, None).await {
+                    Ok(client) => {
+                        match client.get_connection_manager().await {
+                            Ok(m) => *mgr_watch.write().await = m,
+                            Err(e) => tracing::warn!("sentinel manager rebuild: {e}"),
+                        }
+                        match subscribe(&client).await {
+                            Ok(pubsub) => run_pubsub(pubsub, route.clone()).await,
+                            Err(e) => tracing::warn!("sentinel subscribe: {e}"),
+                        }
                     }
-                    continue;
-                }
-                let Some(channel) = topic.strip_prefix(&topic_prefix) else {
-                    continue;
-                };
-                match serde_json::from_slice::<Envelope>(&payload) {
-                    Ok(env) => route(env.into_node_message(channel.to_string())),
-                    Err(e) => tracing::warn!("redis pubsub decode {channel}: {e}"),
+                    Err(e) => tracing::warn!("sentinel resolve master {master}: {e}"),
                 }
             }
         });
-
         Ok(RedisEngine { mgr })
     }
 
@@ -260,7 +299,7 @@ impl RedisEngine {
 
     async fn publish_envelope(&self, channel: &str, env: &Envelope) -> anyhow::Result<()> {
         let payload = serde_json::to_vec(env)?;
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let _: () = conn.publish(Self::pub_key(channel), payload).await?;
         Ok(())
     }
@@ -268,7 +307,7 @@ impl RedisEngine {
     /// Read the full retained history + top position, ensuring the stream has a
     /// stable epoch (created lazily, like the memory engine).
     async fn read_history(&self, channel: &str) -> anyhow::Result<(Vec<Publication>, StreamPosition)> {
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let meta_key = Self::meta_key(channel);
         // Ensure an epoch exists so recovery against an empty stream is stable.
         let candidate = new_epoch();
@@ -316,7 +355,7 @@ impl Engine for RedisEngine {
                 info: info.clone().map(Into::into),
             })?;
             let ttl_ms = (opts.history_lifetime as i64) * 1000;
-            let mut conn = self.mgr.clone();
+            let mut conn = self.mgr.read().await.clone();
             let _: redis::Value = redis::Script::new(HIST_ADD)
                 .key(Self::meta_key(channel))
                 .key(Self::list_key(channel))
@@ -342,7 +381,7 @@ impl Engine for RedisEngine {
         // Publish to the control channel; every node (including this one, via its
         // own subscriber) applies it.
         let payload = serde_json::to_vec(&msg)?;
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let _: () = conn.publish(format!("{PREFIX}.control"), payload).await?;
         Ok(())
     }
@@ -397,7 +436,7 @@ impl Engine for RedisEngine {
     }
 
     async fn remove_history(&self, channel: &str) -> anyhow::Result<()> {
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let _: () = conn
             .del(&[Self::meta_key(channel), Self::list_key(channel)])
             .await?;
@@ -416,7 +455,7 @@ impl Engine for RedisEngine {
         let ttl = ttl_ms;
         let payload = serde_json::to_vec(&WireInfo::from(info))?;
         let expire_at = now_ms() + ttl;
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let _: () = redis::Script::new(PRESENCE_ADD)
             .key(Self::presence_data_key(channel))
             .key(Self::presence_exp_key(channel))
@@ -430,7 +469,7 @@ impl Engine for RedisEngine {
     }
 
     async fn remove_presence(&self, channel: &str, client_id: &str) -> anyhow::Result<()> {
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         let _: () = conn
             .hdel(Self::presence_data_key(channel), client_id)
             .await?;
@@ -441,7 +480,7 @@ impl Engine for RedisEngine {
     }
 
     async fn presence(&self, channel: &str) -> anyhow::Result<HashMap<String, ClientInfo>> {
-        let mut conn = self.mgr.clone();
+        let mut conn = self.mgr.read().await.clone();
         // Prune expired entries (by the exp zset) then read the survivors,
         // atomically. Returns a flat [field, value, field, value, ...] array.
         let flat: Vec<Vec<u8>> = redis::Script::new(PRESENCE_READ)
