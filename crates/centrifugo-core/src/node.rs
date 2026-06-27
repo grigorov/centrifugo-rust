@@ -238,6 +238,11 @@ pub struct Node {
     use_seq_gen: bool,
 }
 
+/// centrifugo v2.8.6 default for the `UseSeqGen` compatibility flag (`v3_use_offset`
+/// defaults to false). Single source of truth for both the [`Node`] and the route
+/// callback ([`make_route`]); we do not expose `v3_use_offset` config.
+pub const DEFAULT_USE_SEQ_GEN: bool = true;
+
 impl Node {
     /// Build a node from a pre-constructed hub + engine (used when the engine is
     /// built asynchronously, e.g. the Redis engine). Pair with [`make_route`].
@@ -280,7 +285,7 @@ impl Node {
             proxies,
             presence_ping_interval: Duration::from_secs(presence_ping_secs),
             presence_expire_ms: presence_expire_secs * 1000,
-            use_seq_gen: true,
+            use_seq_gen: DEFAULT_USE_SEQ_GEN,
         })
     }
 
@@ -293,7 +298,8 @@ impl Node {
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
         let registry = Arc::new(NodeRegistry::new(uuid::Uuid::new_v4().to_string()));
-        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub, &registry)));
+        let engine: Arc<dyn Engine> =
+            Arc::new(MemoryEngine::new(make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN)));
         Self::new_with_engine(
             hub,
             engine,
@@ -610,19 +616,35 @@ fn apply_control(hub: &Hub, registry: &NodeRegistry, cmd: ControlMessage) {
 /// Build the route callback that delivers engine [`NodeMessage`]s to this node's
 /// local subscribers (and applies control commands). Both the memory and Redis
 /// engines are constructed with it; the `registry` receives NODE pings.
-pub fn make_route(hub: &Arc<Hub>, registry: &Arc<NodeRegistry>) -> RouteFn {
+///
+/// `use_seq_gen` mirrors Go's `UseSeqGen` compatibility flag (the v2.8.6 default):
+/// when set, a recoverable-channel live publication ships seq/gen unpacked from
+/// its offset, with the offset zeroed — see [`route_message`].
+pub fn make_route(hub: &Arc<Hub>, registry: &Arc<NodeRegistry>, use_seq_gen: bool) -> RouteFn {
     let hub = hub.clone();
     let registry = registry.clone();
-    Arc::new(move |msg| route_message(&hub, &registry, msg))
+    Arc::new(move |msg| route_message(&hub, &registry, use_seq_gen, msg))
 }
 
 /// Turn a [`NodeMessage`] into the matching push and fan it out locally.
-fn route_message(hub: &Hub, registry: &NodeRegistry, msg: NodeMessage) {
+fn route_message(hub: &Hub, registry: &NodeRegistry, use_seq_gen: bool, msg: NodeMessage) {
     match msg {
         NodeMessage::Publication {
             channel,
-            publication,
-        } => deliver_push(hub, &channel, PushType::Publication, &publication),
+            mut publication,
+        } => {
+            // Go hub.go (broadcastPublication): with UseSeqGen — the v2.8.6 default —
+            // a live publication on a recoverable channel carries seq/gen unpacked
+            // from its offset, and the offset is zeroed before encoding. Non-recoverable
+            // channels have offset 0, so there is nothing to convert.
+            if use_seq_gen && publication.offset != 0 {
+                let (seq, gen) = crate::client::unpack_offset(publication.offset);
+                publication.seq = seq;
+                publication.gen = gen;
+                publication.offset = 0;
+            }
+            deliver_push(hub, &channel, PushType::Publication, &publication)
+        }
         NodeMessage::Join { channel, info } => {
             deliver_push(hub, &channel, PushType::Join, &Join { info })
         }
@@ -765,6 +787,54 @@ mod tests {
         assert!(v.get("id").is_none(), "push must have no id: {s}");
         assert_eq!(v["result"]["channel"], "news");
         assert_eq!(v["result"]["data"]["data"]["msg"], "hi");
+    }
+
+    #[tokio::test]
+    async fn live_pub_on_recoverable_channel_carries_seq_gen_not_offset() {
+        // Recoverable channel (history on). Go's UseSeqGen default (v2.8.6) ships a
+        // live publication with seq/gen unpacked from its offset and the offset
+        // zeroed — so a seq/gen-era client can track stream position from live
+        // messages. A non-recoverable channel would carry none of these.
+        let mut ns = Namespaces::default();
+        ns.default.history_size = 10;
+        ns.default.history_lifetime = 60;
+        ns.default.publish = true;
+        let node = Node::new_with(Arc::new(TokenVerifier::default()), true, ns);
+
+        let (tx_b, mut rx_b) = mpsc::channel::<Out>(16);
+        let mut sub = node.new_client(tx_b, ProtocolType::Json);
+        sub.handle_command(&connect_cmd(1)).await;
+        sub.handle_command(&subscribe_cmd(2, "news")).await;
+
+        let (tx_a, _rx_a) = mpsc::channel::<Out>(16);
+        let mut pubr = node.new_client(tx_a, ProtocolType::Json);
+        pubr.handle_command(&connect_cmd(1)).await;
+        let r = pubr
+            .handle_command(&publish_cmd(2, "news", r#"{"msg":"hi"}"#))
+            .await;
+        assert!(r.replies[0].error.is_none(), "publish errored");
+
+        let out = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        let Out::Frame(frame) = out else {
+            panic!("expected a frame")
+        };
+        let s = String::from_utf8(frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim_end()).unwrap();
+        let publication = &v["result"]["data"];
+        // First publish -> offset 1 -> seq 1, gen 0 (omitted), offset omitted.
+        assert_eq!(publication["data"]["msg"], "hi", "frame: {s}");
+        assert_eq!(publication["seq"], 1, "live pub must carry seq: {s}");
+        assert!(
+            publication.get("offset").is_none(),
+            "live pub must not carry offset on the wire: {s}"
+        );
+        assert!(
+            publication.get("gen").is_none(),
+            "gen 0 must be omitted: {s}"
+        );
     }
 
     #[tokio::test]

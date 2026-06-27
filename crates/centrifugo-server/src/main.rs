@@ -14,7 +14,9 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::{gen_connect_token, TokenVerifier};
-use centrifugo_core::{make_route, Engine, Hub, MemoryEngine, Node, NodeRegistry};
+use centrifugo_core::{
+    make_route, Engine, Hub, MemoryEngine, Node, NodeRegistry, DEFAULT_USE_SEQ_GEN,
+};
 use centrifugo_redis::RedisEngine;
 use clap::Parser;
 
@@ -193,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
                         RedisEngine::connect_sentinel(
                             &settings.redis_master_name,
                             &settings.redis_sentinels,
-                            make_route(&hub, &registry),
+                            make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
                         )
                         .await
@@ -202,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
                         tracing::info!("using redis engine at {}", settings.redis_address);
                         RedisEngine::connect(
                             &settings.redis_address,
-                            make_route(&hub, &registry),
+                            make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
                         )
                         .await
@@ -212,7 +214,11 @@ async fn main() -> anyhow::Result<()> {
                     };
                     Arc::new(e)
                 }
-                _ => Arc::new(MemoryEngine::new(make_route(&hub, &registry))),
+                _ => Arc::new(MemoryEngine::new(make_route(
+                    &hub,
+                    &registry,
+                    DEFAULT_USE_SEQ_GEN,
+                ))),
             };
             let node = Node::new_with_engine(
                 hub,

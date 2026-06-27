@@ -58,20 +58,22 @@ impl MemoryEngine {
         }
     }
 
+    /// Append to history and return the offset assigned to this publication.
     fn add_to_history(
         &self,
         channel: &str,
         data: &[u8],
         info: Option<ClientInfo>,
         opts: PublishOptions,
-    ) {
+    ) -> u64 {
         let mut hist = self.history.lock();
         let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
         stream.offset += 1;
+        let offset = stream.offset;
         let publication = Publication {
             data: Some(Raw::from_bytes(data)),
             info,
-            offset: stream.offset,
+            offset,
             ..Default::default()
         };
         stream.pubs.push_back(publication);
@@ -79,6 +81,7 @@ impl MemoryEngine {
             stream.pubs.pop_front();
         }
         stream.expire_at = now_unix() + opts.history_lifetime as i64;
+        offset
     }
 
     /// On history-lifetime expiry, drop only the buffered publications but keep
@@ -106,14 +109,18 @@ impl Engine for MemoryEngine {
         info: Option<ClientInfo>,
         opts: PublishOptions,
     ) -> anyhow::Result<()> {
-        if opts.history_enabled() {
-            self.add_to_history(channel, data, info.clone(), opts);
-        }
-        // Live publication carries no position (offset/seq/gen zeroed on the wire,
-        // matching Go hub.go); recovery uses history.
+        // On a recoverable channel the live publication carries its history offset;
+        // the route layer converts offset -> seq/gen (zeroing offset) per Go's
+        // UseSeqGen default. Non-recoverable channels keep offset 0.
+        let offset = if opts.history_enabled() {
+            self.add_to_history(channel, data, info.clone(), opts)
+        } else {
+            0
+        };
         let publication = Publication {
             data: Some(Raw::from_bytes(data)),
             info,
+            offset,
             ..Default::default()
         };
         (self.route)(NodeMessage::Publication {

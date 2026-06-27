@@ -1084,8 +1084,10 @@ fn pack_offset(seq: u32, gen: u32) -> u64 {
     (gen as u64) * (u32::MAX as u64) + (seq as u64)
 }
 
-/// (seq, gen) from offset (centrifuge recovery.UnpackUint64).
-fn unpack_offset(v: u64) -> (u32, u32) {
+/// (seq, gen) from offset (centrifuge recovery.UnpackUint64). Shared with the
+/// live-broadcast path in [`crate::node`], which converts a recoverable-channel
+/// publication's offset into seq/gen on the wire.
+pub(crate) fn unpack_offset(v: u64) -> (u32, u32) {
     (v as u32, (v >> 32) as u32)
 }
 

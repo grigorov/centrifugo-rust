@@ -15,7 +15,10 @@ pub use engine::{ControlMessage, Engine, NodeInfoData, NodeMessage, PublishOptio
 pub use hub::{ClientHandle, ClientId, Hub, Out, Signal};
 pub use memory::MemoryEngine;
 pub use metrics::Metrics;
-pub use node::{make_route, ChannelOptions, Namespaces, Node, NodeRegistry, StreamPosition};
+pub use node::{
+    make_route, ChannelOptions, Namespaces, Node, NodeRegistry, StreamPosition,
+    DEFAULT_USE_SEQ_GEN,
+};
 pub use proxy::{
     ConnectProxy, Proxies, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest,
     ProxyOutcome, ProxyRequest, PublishData, PublishProxy, RefreshCreds, RefreshProxy, RpcData,
