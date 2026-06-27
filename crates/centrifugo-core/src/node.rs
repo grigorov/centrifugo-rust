@@ -44,6 +44,11 @@ pub struct ChannelOptions {
     pub proxy_subscribe: bool,
     /// Proxy PUBLISH on this channel to the publish-proxy endpoint.
     pub proxy_publish: bool,
+    /// Allow clients to publish to this channel (`publish` option). Without it
+    /// (and not insecure) a client PUBLISH is PermissionDenied.
+    pub publish: bool,
+    /// Require the publisher to be subscribed to the channel (`subscribe_to_publish`).
+    pub subscribe_to_publish: bool,
 }
 
 impl ChannelOptions {

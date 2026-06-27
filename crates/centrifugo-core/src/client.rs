@@ -520,45 +520,63 @@ impl Client {
             Ok(r) => r,
             Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
         };
+        // Go (centrifuge handlePublish): empty channel or empty data is rejected
+        // with DisconnectBadRequest (3003).
+        let mut data: Vec<u8> = match req.data.as_ref() {
+            Some(r) if !r.as_bytes().is_empty() => r.as_bytes().to_vec(),
+            _ => return CommandOutcome::disconnect(Disconnect::bad_request()),
+        };
         if req.channel.is_empty() {
-            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
+            return CommandOutcome::disconnect(Disconnect::bad_request());
         }
-        let mut data: Vec<u8> = req
-            .data
-            .as_ref()
-            .map(|r| r.as_bytes().to_vec())
-            .unwrap_or_else(|| b"null".to_vec());
+
+        // Channel options + publish permission (Go OnPublish): unknown namespace
+        // -> UnknownChannel(102); !publish && !insecure -> PermissionDenied(103);
+        // subscribe_to_publish requires an active subscription.
+        let (can_publish, subscribe_to_publish, proxy_publish) =
+            match self.node.channel_options(&req.channel) {
+                Some(o) => (o.publish, o.subscribe_to_publish, o.proxy_publish),
+                None => {
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::unknown_channel(),
+                    )])
+                }
+            };
+        if !can_publish && !self.node.client_insecure() {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
+        }
+        if subscribe_to_publish && !self.is_subscribed(&req.channel) {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
+        }
 
         // Publish proxy (per-channel `proxy_publish`): the endpoint may deny
         // (error/disconnect) or transform the payload before it is published.
-        let proxy_publish = self
-            .node
-            .channel_options(&req.channel)
-            .map(|o| o.proxy_publish)
-            .unwrap_or(false);
+        // proxy_publish with no proxy configured -> NotAvailable(108), like Go.
         if proxy_publish {
-            if let Some(proxy) = self.node.proxies().publish.clone() {
-                let mut preq = self.proxy_request();
-                preq.channel = req.channel.clone();
-                preq.data = Some(data.clone());
-                match proxy.publish(preq).await {
-                    Ok(ProxyOutcome::Result(d)) => {
-                        if let Some(nd) = d.data {
-                            data = nd;
-                        }
+            let Some(proxy) = self.node.proxies().publish.clone() else {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
+            };
+            let mut preq = self.proxy_request();
+            preq.channel = req.channel.clone();
+            preq.data = Some(data.clone());
+            match proxy.publish(preq).await {
+                Ok(ProxyOutcome::Result(d)) => {
+                    if let Some(nd) = d.data {
+                        data = nd;
                     }
-                    Ok(ProxyOutcome::Error { code, message }) => {
-                        return CommandOutcome::replies(vec![Reply::err(
-                            cmd.id,
-                            Error::new(code, message),
-                        )]);
-                    }
-                    Ok(ProxyOutcome::Disconnect { code, reason }) => {
-                        return CommandOutcome::disconnect(Disconnect::new(code, reason, false));
-                    }
-                    Err(_) => {
-                        return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]);
-                    }
+                }
+                Ok(ProxyOutcome::Error { code, message }) => {
+                    return CommandOutcome::replies(vec![Reply::err(
+                        cmd.id,
+                        Error::new(code, message),
+                    )]);
+                }
+                Ok(ProxyOutcome::Disconnect { code, reason }) => {
+                    return CommandOutcome::disconnect(Disconnect::new(code, reason, false));
+                }
+                Err(_) => {
+                    return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::internal())]);
                 }
             }
         }

@@ -77,6 +77,12 @@ pub struct ServeArgs {
     /// JWKS endpoint URL; keys are fetched and matched by token `kid`.
     #[arg(long = "token_jwks_public_endpoint", default_value = "")]
     pub token_jwks_public_endpoint: String,
+    /// Allow clients to publish to channels (default namespace).
+    #[arg(long = "publish")]
+    pub publish: bool,
+    /// Require publishers to be subscribed (default namespace).
+    #[arg(long = "subscribe_to_publish")]
+    pub subscribe_to_publish: bool,
     /// Enable presence on all channels.
     #[arg(long = "presence")]
     pub presence: bool,

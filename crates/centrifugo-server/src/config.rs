@@ -138,6 +138,8 @@ impl Settings {
                     server_side: false,
                     proxy_subscribe: false,
                     proxy_publish: false,
+                    publish: a.publish,
+                    subscribe_to_publish: a.subscribe_to_publish,
                 },
                 namespaces: HashMap::new(),
                 namespace_boundary: ":".into(),
@@ -220,6 +222,10 @@ struct ChannelOptionsCfg {
     proxy_subscribe: bool,
     #[serde(default)]
     proxy_publish: bool,
+    #[serde(default)]
+    publish: bool,
+    #[serde(default)]
+    subscribe_to_publish: bool,
 }
 
 impl From<ChannelOptionsCfg> for ChannelOptions {
@@ -235,6 +241,8 @@ impl From<ChannelOptionsCfg> for ChannelOptions {
             server_side: c.server_side,
             proxy_subscribe: c.proxy_subscribe,
             proxy_publish: c.proxy_publish,
+            publish: c.publish,
+            subscribe_to_publish: c.subscribe_to_publish,
         }
     }
 }
