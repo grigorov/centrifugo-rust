@@ -208,6 +208,9 @@ impl NodeRegistry {
 pub struct Node {
     /// Stable per-process node id (Go node UID); reported by the Info API.
     id: String,
+    /// Human-readable node name (Go `config.name`, default `hostname_port`).
+    /// Distinct from `id`: routing/dedup use the UID; the name is for display.
+    name: String,
     /// Reported in this node's NODE pings (Go `config.Version`).
     version: String,
     /// Unix seconds at node creation; Info `uptime` is derived from it.
@@ -260,18 +263,20 @@ impl Node {
         presence_expire_secs: u64,
         registry: Arc<NodeRegistry>,
         version: String,
+        name: String,
     ) -> Arc<Self> {
         let id = registry.self_uid().to_string();
         // Seed our own registry entry so the Info API always lists this node, even
         // before the first NODE ping (counts are refreshed by the ping + at query).
         registry.add(NodeInfoData {
             uid: id.clone(),
-            name: id.clone(),
+            name: name.clone(),
             version: version.clone(),
             ..Default::default()
         });
         Arc::new(Node {
             id,
+            name,
             version,
             started_unix: now_unix(),
             registry,
@@ -312,6 +317,7 @@ impl Node {
             60,
             registry,
             "2.8.6".into(),
+            "node".into(),
         )
     }
 
@@ -357,7 +363,7 @@ impl Node {
     fn self_node_info(&self) -> NodeInfoData {
         NodeInfoData {
             uid: self.id.clone(),
-            name: self.id.clone(),
+            name: self.name.clone(),
             version: self.version.clone(),
             num_clients: self.hub.num_clients() as u32,
             num_users: self.hub.num_users() as u32,

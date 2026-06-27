@@ -14,6 +14,8 @@ use crate::cli::ServeArgs;
 pub struct Settings {
     pub address: String,
     pub port: u16,
+    /// Node name for display (Go `name`; empty → `hostname_port` at startup).
+    pub name: String,
     pub client_insecure: bool,
     pub client_anonymous: bool,
     pub client_presence_ping_interval: u64,
@@ -113,6 +115,7 @@ impl Settings {
         Settings {
             address: a.address.clone(),
             port: a.port,
+            name: a.name.clone(),
             client_insecure: a.client_insecure,
             client_anonymous: a.client_anonymous,
             client_presence_ping_interval: a.client_presence_ping_interval,
@@ -178,6 +181,7 @@ impl Settings {
         Ok(Settings {
             address: a.address.clone(),
             port: a.port,
+            name: fc.name,
             client_insecure: fc.client_insecure,
             client_anonymous: fc.client_anonymous,
             client_presence_ping_interval: fc.client_presence_ping_interval,
@@ -304,6 +308,8 @@ fn default_redis_address() -> String {
 
 #[derive(Deserialize, Default)]
 struct FileConfig {
+    #[serde(default)]
+    name: String,
     #[serde(default)]
     client_insecure: bool,
     #[serde(default)]

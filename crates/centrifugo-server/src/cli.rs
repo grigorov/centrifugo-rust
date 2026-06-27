@@ -59,6 +59,9 @@ pub struct ServeArgs {
     pub address: String,
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
+    /// Node name for display/Info (Go `name`); empty → `hostname_port`.
+    #[arg(long = "name", default_value = "")]
+    pub name: String,
     /// Allow connections without a token (anonymous), assigning a fresh client id.
     #[arg(long = "client_insecure")]
     pub client_insecure: bool,

@@ -79,6 +79,20 @@ fn read_pem_opt(path: &str) -> anyhow::Result<Option<Vec<u8>>> {
     }
 }
 
+/// The machine hostname (Go uses `os.Hostname()` for the default node name).
+/// Dep-free: shell out to `hostname`, fall back to `$HOSTNAME`, then `centrifugo`.
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "centrifugo".to_string())
+}
+
 /// Fetch a JWKS document body from `url`.
 async fn fetch_jwks(url: &str) -> anyhow::Result<String> {
     Ok(reqwest::Client::new()
@@ -224,6 +238,13 @@ async fn main() -> anyhow::Result<()> {
                     DEFAULT_USE_SEQ_GEN,
                 ))),
             };
+            // Node name (Go config `name`, default `hostname_port`) — display only;
+            // routing/dedup use the UID.
+            let node_name = if settings.name.is_empty() {
+                format!("{}_{}", hostname(), settings.port)
+            } else {
+                settings.name.clone()
+            };
             let node = Node::new_with_engine(
                 hub,
                 engine,
@@ -236,6 +257,7 @@ async fn main() -> anyhow::Result<()> {
                 settings.client_presence_expire_interval,
                 registry,
                 VERSION.to_string(),
+                node_name,
             );
             // Broadcast NODE-info pings + prune stale nodes (cluster membership).
             node.spawn_node_pings();

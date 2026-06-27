@@ -1150,6 +1150,7 @@ mod tests {
             60,
             registry,
             "2.8.6".into(),
+            "node".into(),
         )
     }
 
