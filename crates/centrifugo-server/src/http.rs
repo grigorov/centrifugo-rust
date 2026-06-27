@@ -38,13 +38,11 @@ pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> 
             post(sockjs::xhr_send).options(sockjs::options),
         );
 
-    // Admin web UI served at the root when admin is enabled.
+    // Admin web UI served at the root when admin is enabled. A fallback serves
+    // the whole asset tree (index.html for `/`, any file under admin_web_path or
+    // the embedded bundle) without conflicting with the API/WS routes above.
     if admin_config.enabled {
-        router = router
-            .route("/", get(webui::index))
-            .route("/bundle.js", get(webui::bundle_js))
-            .route("/styles.css", get(webui::styles_css))
-            .route("/favicon.png", get(webui::favicon_png));
+        router = router.fallback(webui::asset_fallback);
     }
 
     router
