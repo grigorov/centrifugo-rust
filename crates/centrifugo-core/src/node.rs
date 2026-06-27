@@ -19,7 +19,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 
 use crate::client::Client;
-use crate::engine::{ControlMessage, Engine, NodeMessage, PublishOptions, RouteFn};
+use crate::engine::{ControlMessage, Engine, NodeInfoData, NodeMessage, PublishOptions, RouteFn};
 use crate::hub::{Hub, Out, Signal};
 use crate::memory::MemoryEngine;
 use crate::proxy::Proxies;
@@ -156,11 +156,64 @@ pub(crate) fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Registry of known cluster nodes — this node plus remotes (Go or Rust) learned
+/// from periodic NODE-info control pings. Keyed by node uid with a last-seen
+/// timestamp so stale nodes are pruned (mirrors centrifuge's `nodeRegistry`).
+pub struct NodeRegistry {
+    self_uid: String,
+    nodes: parking_lot::Mutex<HashMap<String, (NodeInfoData, i64)>>,
+}
+
+impl NodeRegistry {
+    pub fn new(self_uid: String) -> Self {
+        NodeRegistry {
+            self_uid,
+            nodes: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// This node's own uid.
+    pub fn self_uid(&self) -> &str {
+        &self.self_uid
+    }
+
+    /// Record (or refresh) a node's info from a NODE ping.
+    pub fn add(&self, info: NodeInfoData) {
+        let now = now_ms();
+        self.nodes.lock().insert(info.uid.clone(), (info, now));
+    }
+
+    /// All currently-known nodes.
+    pub fn list(&self) -> Vec<NodeInfoData> {
+        self.nodes.lock().values().map(|(i, _)| i.clone()).collect()
+    }
+
+    /// Drop remote nodes not seen within `max_age_ms` (this node is kept always).
+    pub fn clean(&self, max_age_ms: i64) {
+        let now = now_ms();
+        let self_uid = &self.self_uid;
+        self.nodes
+            .lock()
+            .retain(|uid, (_, seen)| uid == self_uid || now - *seen <= max_age_ms);
+    }
+}
+
 pub struct Node {
     /// Stable per-process node id (Go node UID); reported by the Info API.
     id: String,
+    /// Reported in this node's NODE pings (Go `config.Version`).
+    version: String,
     /// Unix seconds at node creation; Info `uptime` is derived from it.
     started_unix: i64,
+    /// Known cluster nodes (this node + remotes via NODE pings); backs the Info API.
+    registry: Arc<NodeRegistry>,
     /// Prometheus-style counters (commands, messages sent, connects).
     metrics: Arc<crate::metrics::Metrics>,
     hub: Arc<Hub>,
@@ -200,10 +253,23 @@ impl Node {
         proxies: Proxies,
         presence_ping_secs: u64,
         presence_expire_secs: u64,
+        registry: Arc<NodeRegistry>,
+        version: String,
     ) -> Arc<Self> {
+        let id = registry.self_uid().to_string();
+        // Seed our own registry entry so the Info API always lists this node, even
+        // before the first NODE ping (counts are refreshed by the ping + at query).
+        registry.add(NodeInfoData {
+            uid: id.clone(),
+            name: id.clone(),
+            version: version.clone(),
+            ..Default::default()
+        });
         Arc::new(Node {
-            id: uuid::Uuid::new_v4().to_string(),
+            id,
+            version,
             started_unix: now_unix(),
+            registry,
             metrics: Arc::new(crate::metrics::Metrics::new()),
             hub,
             engine,
@@ -226,7 +292,8 @@ impl Node {
         namespaces: Namespaces,
     ) -> Arc<Self> {
         let hub = Arc::new(Hub::new());
-        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub)));
+        let registry = Arc::new(NodeRegistry::new(uuid::Uuid::new_v4().to_string()));
+        let engine: Arc<dyn Engine> = Arc::new(MemoryEngine::new(make_route(&hub, &registry)));
         Self::new_with_engine(
             hub,
             engine,
@@ -237,6 +304,8 @@ impl Node {
             Proxies::default(),
             25,
             60,
+            registry,
+            "2.8.6".into(),
         )
     }
 
@@ -263,6 +332,52 @@ impl Node {
     /// The Prometheus metrics registry.
     pub fn metrics(&self) -> &Arc<crate::metrics::Metrics> {
         &self.metrics
+    }
+
+    /// All known cluster nodes (this node + remotes) for the Info API. This node's
+    /// entry is refreshed with live counts at query time; remotes are as last pinged.
+    pub fn info_nodes(&self) -> Vec<NodeInfoData> {
+        let mut nodes = self.registry.list();
+        if let Some(me) = nodes.iter_mut().find(|n| n.uid == self.id) {
+            me.num_clients = self.hub.num_clients() as u32;
+            me.num_users = self.hub.num_users() as u32;
+            me.num_channels = self.hub.num_channels() as u32;
+            me.uptime = self.uptime();
+        }
+        nodes
+    }
+
+    /// This node's current info for a NODE ping.
+    fn self_node_info(&self) -> NodeInfoData {
+        NodeInfoData {
+            uid: self.id.clone(),
+            name: self.id.clone(),
+            version: self.version.clone(),
+            num_clients: self.hub.num_clients() as u32,
+            num_users: self.hub.num_users() as u32,
+            num_channels: self.hub.num_channels() as u32,
+            uptime: self.uptime(),
+        }
+    }
+
+    /// Spawn the cluster-membership tasks: publish a NODE info ping every 3s
+    /// (Go `nodeInfoPublishInterval`) so other nodes register this one, and prune
+    /// remotes not seen within 7s (`nodeInfoMaxDelay`) every 9s. Server-only.
+    pub fn spawn_node_pings(self: &Arc<Self>) {
+        let node = self.clone();
+        tokio::spawn(async move {
+            let mut ping = tokio::time::interval(Duration::from_secs(3));
+            let mut clean = tokio::time::interval(Duration::from_secs(9));
+            loop {
+                tokio::select! {
+                    _ = ping.tick() => {
+                        let info = node.self_node_info();
+                        let _ = node.engine.publish_control(ControlMessage::Node(info)).await;
+                    }
+                    _ = clean.tick() => node.registry.clean(7000),
+                }
+            }
+        });
     }
 
     pub fn hub(&self) -> &Arc<Hub> {
@@ -467,8 +582,10 @@ impl Node {
 
 /// Apply a cross-node control command to this node's local connections by
 /// signalling each affected connection's reader task.
-fn apply_control(hub: &Hub, cmd: ControlMessage) {
+fn apply_control(hub: &Hub, registry: &NodeRegistry, cmd: ControlMessage) {
     match cmd {
+        // NODE ping → record the (possibly remote, possibly Go) node in the registry.
+        ControlMessage::Node(info) => registry.add(info),
         ControlMessage::Unsubscribe { user, channel } => {
             for h in hub.user_clients(&user) {
                 if let Some(ctrl) = &h.ctrl {
@@ -491,14 +608,16 @@ fn apply_control(hub: &Hub, cmd: ControlMessage) {
 }
 
 /// Build the route callback that delivers engine [`NodeMessage`]s to this node's
-/// local subscribers. Both the memory and Redis engines are constructed with it.
-pub fn make_route(hub: &Arc<Hub>) -> RouteFn {
+/// local subscribers (and applies control commands). Both the memory and Redis
+/// engines are constructed with it; the `registry` receives NODE pings.
+pub fn make_route(hub: &Arc<Hub>, registry: &Arc<NodeRegistry>) -> RouteFn {
     let hub = hub.clone();
-    Arc::new(move |msg| route_message(&hub, msg))
+    let registry = registry.clone();
+    Arc::new(move |msg| route_message(&hub, &registry, msg))
 }
 
 /// Turn a [`NodeMessage`] into the matching push and fan it out locally.
-fn route_message(hub: &Hub, msg: NodeMessage) {
+fn route_message(hub: &Hub, registry: &NodeRegistry, msg: NodeMessage) {
     match msg {
         NodeMessage::Publication {
             channel,
@@ -510,7 +629,7 @@ fn route_message(hub: &Hub, msg: NodeMessage) {
         NodeMessage::Leave { channel, info } => {
             deliver_push(hub, &channel, PushType::Leave, &Leave { info })
         }
-        NodeMessage::Control(cmd) => apply_control(hub, cmd),
+        NodeMessage::Control(cmd) => apply_control(hub, registry, cmd),
     }
 }
 
@@ -568,6 +687,26 @@ mod tests {
     use centrifugo_protocol::{Command, MethodType, ProtocolType, Raw};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn node_registry_add_list_and_prune() {
+        let r = NodeRegistry::new("self".into());
+        r.add(NodeInfoData {
+            uid: "self".into(),
+            ..Default::default()
+        });
+        r.add(NodeInfoData {
+            uid: "remote".into(),
+            ..Default::default()
+        });
+        assert_eq!(r.list().len(), 2);
+        // A negative max-age prunes everything not seen "in the future" — i.e. all
+        // remotes — but this node is always kept.
+        r.clean(-1);
+        let list = r.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].uid, "self");
+    }
 
     fn raw(s: String) -> Raw {
         Raw::from_bytes(s.into_bytes())

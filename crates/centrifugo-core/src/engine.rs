@@ -14,13 +14,25 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
-use serde::{Deserialize, Serialize};
 
 use crate::node::StreamPosition;
 
-/// A cross-node control command, broadcast to every node so a user's connections
-/// are acted on cluster-wide (server-side unsubscribe / disconnect).
-#[derive(Clone, Serialize, Deserialize)]
+/// One node's published info (centrifuge `controlpb.Node`), shared across the
+/// cluster via NODE control pings and aggregated by the `info` API.
+#[derive(Clone, Default)]
+pub struct NodeInfoData {
+    pub uid: String,
+    pub name: String,
+    pub version: String,
+    pub num_clients: u32,
+    pub num_users: u32,
+    pub num_channels: u32,
+    pub uptime: u32,
+}
+
+/// A cross-node control command, broadcast to every node (server-side
+/// unsubscribe / disconnect, and periodic NODE-info pings).
+#[derive(Clone)]
 pub enum ControlMessage {
     /// Unsubscribe `user`'s connections from `channel` (empty `channel` = all).
     Unsubscribe { user: String, channel: String },
@@ -30,6 +42,8 @@ pub enum ControlMessage {
         code: u32,
         reason: String,
     },
+    /// A node's periodic info ping (registered in every node's registry).
+    Node(NodeInfoData),
 }
 
 /// Per-publish history directives. `0/0` means history is disabled for the

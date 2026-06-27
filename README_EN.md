@@ -36,7 +36,7 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | gRPC API (port 10000) | ✅ same 11 RPCs, apikey in metadata |
 | Personal channels | ✅ `user_subscribe_to_personal` auto-subscribe to `#<user>` |
 | Engines | ✅ Memory (single node) **and** Redis (multi-node), incl. **Sentinel** with mid-flight failover re-resolution |
-| Go ⇄ Rust Redis interop | ✅ live pub/sub **+ history + presence + control** (unsubscribe/disconnect) across Go + Rust nodes on one Redis (centrifuge wire format) |
+| Go ⇄ Rust Redis interop | ✅ live pub/sub **+ history + presence + control + node-info** across Go + Rust nodes on one Redis (centrifuge wire format) — each side's `info` lists the other's nodes |
 | Admin (`/admin/auth`, `/admin/api`) | ✅ token auth + vendored web UI at `/` |
 | Prometheus metrics (`/metrics`) | ✅ node gauges + per-command/per-message/per-transport counters |
 | Configuration | ✅ flags + JSON file (`-c`) + env (`CENTRIFUGO_*`) |
@@ -71,7 +71,7 @@ Broadcasts to **10,000 / 100,000** subscribers never block each other:
 `Engine` (async trait) unifies pub/sub + history + presence. One `Arc<dyn Engine>` backs the `Node`:
 
 - **MemoryEngine** — single node, in-process. History is a size-bounded ring with lazy TTL; presence is a map; the stream meta (offset + epoch) persists past `history_lifetime` expiry (matching Go).
-- **RedisEngine** — multi-node, **byte-compatible with centrifuge v0.14.2's Redis format**, so Go and Rust nodes can share one Redis. Each node pattern-subscribes to `centrifugo.client.*` and routes incoming messages — protobuf `Publication`, plus `__j__`/`__l__`-framed joins/leaves — into its local hub. History is a list (`centrifugo.list.<ch>`, `__<offset>__<protobuf>` entries, LPUSH) + meta hash (`s`=offset, `e`=epoch) appended by the verbatim centrifuge Lua; presence is a `clientID → protobuf ClientInfo` data hash plus an expiry zset, with atomic Lua add/prune-by-score read so crashed-node entries expire. The master can be discovered via **Redis Sentinel** (`redis_master_name` + `redis_sentinels`) with mid-flight failover re-resolution. Cross-node control (server-side unsubscribe/disconnect) rides a Rust-only channel.
+- **RedisEngine** — multi-node, **byte-compatible with centrifuge v0.14.2's Redis format**, so Go and Rust nodes can share one Redis. Each node pattern-subscribes to `centrifugo.client.*` and routes incoming messages — protobuf `Publication`, plus `__j__`/`__l__`-framed joins/leaves — into its local hub. History is a list (`centrifugo.list.<ch>`, `__<offset>__<protobuf>` entries, LPUSH) + meta hash (`s`=offset, `e`=epoch) appended by the verbatim centrifuge Lua; presence is a `clientID → protobuf ClientInfo` data hash plus an expiry zset, with atomic Lua add/prune-by-score read so crashed-node entries expire. The master can be discovered via **Redis Sentinel** (`redis_master_name` + `redis_sentinels`) with mid-flight failover re-resolution. Cross-node control (unsubscribe/disconnect) and periodic NODE-info pings ride `centrifugo.control` as centrifuge `controlpb` protobuf, so cluster membership and control commands interoperate with Go nodes too.
 
 ---
 
@@ -208,4 +208,4 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ## Status
 
-All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **193 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.
+All milestones M0–M12, the full-parity phases (server-side channels, SUB_REFRESH, `#`-channels, presence TTL + refresh timer, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI), and the post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics, Go⇄Rust live Redis interop) are complete. **195 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live centrifuge-go SDK. A full adversarial audit resolved 40+ divergences from the Go reference.

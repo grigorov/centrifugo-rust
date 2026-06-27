@@ -364,3 +364,42 @@ async fn rust_api_disconnect_reaches_go_client() {
     let (code, _) = c.next_close().await;
     assert_eq!(code, 3012, "cross-node force disconnect (3012)");
 }
+
+// ---- Node-info interop (NODE pings → cluster membership in the info API) ----
+
+#[tokio::test]
+async fn node_info_lists_both_go_and_rust() {
+    let Some(redis) = Redis::start().await else {
+        return;
+    };
+    let go_cfg = format!(
+        r#"{{"engine":"redis","redis_url":"redis://{}","client_insecure":true,"api_key":"{KEY}"}}"#,
+        redis.addr
+    );
+    let Some(go) = Oracle::start_with_config(&go_cfg).await else {
+        return;
+    };
+    let rust = Server::start_redis(
+        &redis.addr,
+        &format!(r#"{{"client_insecure":true,"api_key":"{KEY}"}}"#),
+    )
+    .await;
+
+    // Wait past one NODE-ping interval (3s) so the nodes register each other.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let node_count = |r: &serde_json::Value| {
+        r["result"]["nodes"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
+
+    // Go's info lists both nodes — the Rust node appeared in Go's registry.
+    let g = api_post(&go.http, KEY, r#"{"method":"info","params":{}}"#).await;
+    assert!(node_count(&g) >= 2, "go must list both nodes: {g}");
+
+    // Rust's info lists both nodes — the Go node appeared in Rust's registry.
+    let r = api_post(&rust.http, KEY, r#"{"method":"info","params":{}}"#).await;
+    assert!(node_count(&r) >= 2, "rust must list both nodes: {r}");
+}

@@ -14,7 +14,7 @@ mod ws;
 use std::sync::Arc;
 
 use centrifugo_auth::{gen_connect_token, TokenVerifier};
-use centrifugo_core::{make_route, Engine, Hub, MemoryEngine, Node};
+use centrifugo_core::{make_route, Engine, Hub, MemoryEngine, Node, NodeRegistry};
 use centrifugo_redis::RedisEngine;
 use clap::Parser;
 
@@ -180,6 +180,9 @@ async fn main() -> anyhow::Result<()> {
                 .then(|| (settings.grpc_socket_addr(), settings.grpc_api_key.clone()));
             let proxies = proxy_http::build_proxies(&settings);
             let hub = Arc::new(Hub::new());
+            // Shared cluster-node registry; its uid tags this node's control + pings.
+            let registry = Arc::new(NodeRegistry::new(uuid::Uuid::new_v4().to_string()));
+            let node_uid = registry.self_uid().to_string();
             let engine: Arc<dyn Engine> = match settings.engine.as_str() {
                 "redis" => {
                     let e = if !settings.redis_master_name.is_empty() {
@@ -190,21 +193,26 @@ async fn main() -> anyhow::Result<()> {
                         RedisEngine::connect_sentinel(
                             &settings.redis_master_name,
                             &settings.redis_sentinels,
-                            make_route(&hub),
+                            make_route(&hub, &registry),
+                            node_uid.clone(),
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("connect redis via sentinel: {e}"))?
                     } else {
                         tracing::info!("using redis engine at {}", settings.redis_address);
-                        RedisEngine::connect(&settings.redis_address, make_route(&hub))
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("connect redis at {}: {e}", settings.redis_address)
-                            })?
+                        RedisEngine::connect(
+                            &settings.redis_address,
+                            make_route(&hub, &registry),
+                            node_uid.clone(),
+                        )
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("connect redis at {}: {e}", settings.redis_address)
+                        })?
                     };
                     Arc::new(e)
                 }
-                _ => Arc::new(MemoryEngine::new(make_route(&hub))),
+                _ => Arc::new(MemoryEngine::new(make_route(&hub, &registry))),
             };
             let node = Node::new_with_engine(
                 hub,
@@ -216,7 +224,11 @@ async fn main() -> anyhow::Result<()> {
                 proxies,
                 settings.client_presence_ping_interval,
                 settings.client_presence_expire_interval,
+                registry,
+                VERSION.to_string(),
             );
+            // Broadcast NODE-info pings + prune stale nodes (cluster membership).
+            node.spawn_node_pings();
             if let Some((grpc_addr, grpc_key)) = grpc {
                 let grpc_node = Arc::clone(&node);
                 tokio::spawn(async move {

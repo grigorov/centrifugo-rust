@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use centrifugo_core::engine::{ControlMessage, Engine, NodeMessage, PublishOptions};
+use centrifugo_core::engine::{ControlMessage, Engine, NodeInfoData, NodeMessage, PublishOptions};
 use centrifugo_core::node::StreamPosition;
 use centrifugo_core::RouteFn;
 use centrifugo_protocol::messages::{ClientInfo, Publication};
@@ -217,6 +217,19 @@ fn encode_control(node_uid: &str, msg: &ControlMessage) -> Vec<u8> {
             }
             .encode_to_vec(),
         ),
+        ControlMessage::Node(n) => (
+            controlpb::MethodType::Node as i32,
+            controlpb::Node {
+                uid: n.uid.clone(),
+                name: n.name.clone(),
+                version: n.version.clone(),
+                num_clients: n.num_clients,
+                num_users: n.num_users,
+                num_channels: n.num_channels,
+                uptime: n.uptime,
+            }
+            .encode_to_vec(),
+        ),
     };
     controlpb::Command {
         uid: node_uid.to_string(),
@@ -247,7 +260,18 @@ fn decode_control(bytes: &[u8]) -> Option<ControlMessage> {
                 reason: d.reason,
             })
         }
-        controlpb::MethodType::Node => None,
+        controlpb::MethodType::Node => {
+            let n = controlpb::Node::decode(&cmd.params[..]).ok()?;
+            Some(ControlMessage::Node(NodeInfoData {
+                uid: n.uid,
+                name: n.name,
+                version: n.version,
+                num_clients: n.num_clients,
+                num_users: n.num_users,
+                num_channels: n.num_channels,
+                uptime: n.uptime,
+            }))
+        }
     }
 }
 
@@ -321,7 +345,7 @@ async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn) {
 impl RedisEngine {
     /// Connect to Redis at `addr` (`host:port` or a full `redis://` URL) and spawn
     /// the pub/sub subscriber task that routes incoming messages via `route`.
-    pub async fn connect(addr: &str, route: RouteFn) -> anyhow::Result<Self> {
+    pub async fn connect(addr: &str, route: RouteFn, node_uid: String) -> anyhow::Result<Self> {
         let url = if addr.contains("://") {
             addr.to_string()
         } else {
@@ -331,10 +355,7 @@ impl RedisEngine {
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         let pubsub = subscribe(&client).await?;
         tokio::spawn(run_pubsub(pubsub, route));
-        Ok(RedisEngine {
-            mgr,
-            node_uid: uuid::Uuid::new_v4().to_string(),
-        })
+        Ok(RedisEngine { mgr, node_uid })
     }
 
     /// Connect via Redis Sentinel. The master is resolved at startup, and a
@@ -345,6 +366,7 @@ impl RedisEngine {
         master_name: &str,
         sentinels: &str,
         route: RouteFn,
+        node_uid: String,
     ) -> anyhow::Result<Self> {
         let mut addrs: Vec<String> = Vec::new();
         for s in sentinels
@@ -401,10 +423,7 @@ impl RedisEngine {
                 }
             }
         });
-        Ok(RedisEngine {
-            mgr,
-            node_uid: uuid::Uuid::new_v4().to_string(),
-        })
+        Ok(RedisEngine { mgr, node_uid })
     }
 
     fn client_key(channel: &str) -> String {

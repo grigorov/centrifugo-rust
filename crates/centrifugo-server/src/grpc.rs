@@ -15,8 +15,6 @@ use centrifugo_protocol::messages::{
 };
 use tonic::{Request, Response, Status};
 
-use crate::VERSION;
-
 pub struct GrpcApi {
     node: Arc<Node>,
 }
@@ -289,21 +287,24 @@ impl Centrifugo for GrpcApi {
         &self,
         _request: Request<pb::InfoRequest>,
     ) -> Result<Response<pb::InfoResponse>, Status> {
-        let hub = self.node.hub();
+        let nodes = self
+            .node
+            .info_nodes()
+            .into_iter()
+            .map(|n| pb::NodeResult {
+                uid: n.uid,
+                name: n.name,
+                version: n.version,
+                num_clients: n.num_clients,
+                num_users: n.num_users,
+                num_channels: n.num_channels,
+                uptime: n.uptime,
+                metrics: None,
+            })
+            .collect();
         Ok(Response::new(pb::InfoResponse {
             error: None,
-            result: Some(pb::InfoResult {
-                nodes: vec![pb::NodeResult {
-                    uid: self.node.id().to_string(),
-                    name: self.node.id().to_string(),
-                    version: VERSION.to_string(),
-                    num_clients: hub.num_clients() as u32,
-                    num_users: hub.num_users() as u32,
-                    num_channels: hub.num_channels() as u32,
-                    uptime: self.node.uptime(),
-                    metrics: None,
-                }],
-            }),
+            result: Some(pb::InfoResult { nodes }),
         }))
     }
 

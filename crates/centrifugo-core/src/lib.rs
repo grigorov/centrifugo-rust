@@ -11,11 +11,11 @@ pub mod node;
 pub mod proxy;
 
 pub use client::{Client, CommandOutcome};
-pub use engine::{ControlMessage, Engine, NodeMessage, PublishOptions, RouteFn};
+pub use engine::{ControlMessage, Engine, NodeInfoData, NodeMessage, PublishOptions, RouteFn};
 pub use hub::{ClientHandle, ClientId, Hub, Out, Signal};
 pub use memory::MemoryEngine;
 pub use metrics::Metrics;
-pub use node::{make_route, ChannelOptions, Namespaces, Node, StreamPosition};
+pub use node::{make_route, ChannelOptions, Namespaces, Node, NodeRegistry, StreamPosition};
 pub use proxy::{
     ConnectProxy, Proxies, ProxyConnectOutcome, ProxyConnectReply, ProxyConnectRequest,
     ProxyOutcome, ProxyRequest, PublishData, PublishProxy, RefreshCreds, RefreshProxy, RpcData,

@@ -478,16 +478,20 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
         "info" => ok(
             id,
             &InfoResult {
-                nodes: vec![NodeResult {
-                    uid: node.id().to_string(),
-                    name: node.id().to_string(),
-                    version: crate::VERSION.to_string(),
-                    num_clients: node.hub().num_clients() as u32,
-                    num_users: node.hub().num_users() as u32,
-                    num_channels: node.hub().num_channels() as u32,
-                    uptime: node.uptime(),
-                    metrics: None,
-                }],
+                nodes: node
+                    .info_nodes()
+                    .into_iter()
+                    .map(|n| NodeResult {
+                        uid: n.uid,
+                        name: n.name,
+                        version: n.version,
+                        num_clients: n.num_clients,
+                        num_users: n.num_users,
+                        num_channels: n.num_channels,
+                        uptime: n.uptime,
+                        metrics: None,
+                    })
+                    .collect(),
             },
         ),
         _ => err(id, 104, "method not found"),
@@ -624,17 +628,20 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
             .encode_to_vec(),
         ),
         pb::MethodType::Info => {
-            let hub = node.hub();
-            let nodes = vec![pb::NodeResult {
-                uid: node.id().to_string(),
-                name: node.id().to_string(),
-                version: crate::VERSION.to_string(),
-                num_clients: hub.num_clients() as u32,
-                num_users: hub.num_users() as u32,
-                num_channels: hub.num_channels() as u32,
-                uptime: node.uptime(),
-                metrics: None,
-            }];
+            let nodes = node
+                .info_nodes()
+                .into_iter()
+                .map(|n| pb::NodeResult {
+                    uid: n.uid,
+                    name: n.name,
+                    version: n.version,
+                    num_clients: n.num_clients,
+                    num_users: n.num_users,
+                    num_channels: n.num_channels,
+                    uptime: n.uptime,
+                    metrics: None,
+                })
+                .collect();
             reply(None, pb::InfoResult { nodes }.encode_to_vec())
         }
         // Go Executor.RPC: empty method -> BadRequest(107); else (no stock handler
