@@ -29,6 +29,27 @@ async fn publish_via_api_returns_void_reply() {
 }
 
 #[tokio::test]
+async fn api_echoes_request_content_type() {
+    // Go's API handler sets the response Content-Type to the request's (audit #24).
+    let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api", s.http))
+        .header("Authorization", format!("apikey {KEY}"))
+        .header("Content-Type", "application/json; charset=utf-8")
+        .body(r#"{"method":"info","params":{}}"#)
+        .send()
+        .await
+        .unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert_eq!(ct, "application/json; charset=utf-8", "echoed content-type");
+}
+
+#[tokio::test]
 async fn bad_apikey_returns_401() {
     let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
     let code = api_status(&s.http, "wrong", r#"{"method":"info","params":{}}"#).await;

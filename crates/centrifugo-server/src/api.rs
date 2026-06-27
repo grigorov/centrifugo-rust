@@ -205,10 +205,10 @@ async fn run_api(node: &Arc<Node>, headers: &HeaderMap, body: &[u8]) -> Response
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
     if ct.starts_with("application/octet-stream") {
-        run_protobuf(node, body).await
+        run_protobuf(node, body, ct).await
     } else {
         match std::str::from_utf8(body) {
-            Ok(s) => run_commands(node, s).await,
+            Ok(s) => run_commands(node, s, ct).await,
             Err(_) => (StatusCode::BAD_REQUEST, "Bad Request").into_response(),
         }
     }
@@ -216,7 +216,7 @@ async fn run_api(node: &Arc<Node>, headers: &HeaderMap, body: &[u8]) -> Response
 
 /// Protobuf API: decode the uvarint-length-delimited pb Command stream, dispatch
 /// each, and return the uvarint-length-delimited pb Reply stream.
-async fn run_protobuf(node: &Arc<Node>, body: &[u8]) -> Response {
+async fn run_protobuf(node: &Arc<Node>, body: &[u8], req_ct: &str) -> Response {
     if body.is_empty() {
         return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
     }
@@ -232,15 +232,17 @@ async fn run_protobuf(node: &Arc<Node>, body: &[u8]) -> Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response();
         }
     }
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-        out,
-    )
-        .into_response()
+    // Echo the request Content-Type (Go), defaulting to the protobuf type.
+    let ct = if req_ct.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        req_ct.to_string()
+    };
+    ([(axum::http::header::CONTENT_TYPE, ct)], out).into_response()
 }
 
 /// Decode the NDJSON command body, dispatch each, and return the NDJSON replies.
-async fn run_commands(node: &Arc<Node>, body: &str) -> Response {
+async fn run_commands(node: &Arc<Node>, body: &str, req_ct: &str) -> Response {
     if body.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "Bad Request").into_response();
     }
@@ -255,11 +257,13 @@ async fn run_commands(node: &Arc<Node>, body: &str) -> Response {
         buf.push_str(&serde_json::to_string(&reply).unwrap_or_else(|_| "{}".into()));
         buf.push('\n');
     }
-    (
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        buf,
-    )
-        .into_response()
+    // Echo the request Content-Type (Go), defaulting to JSON.
+    let ct = if req_ct.is_empty() {
+        "application/json".to_string()
+    } else {
+        req_ct.to_string()
+    };
+    ([(axum::http::header::CONTENT_TYPE, ct)], buf).into_response()
 }
 
 /// `Authorization: apikey <KEY>` (case-insensitive scheme) or `?api_key=<KEY>`.
