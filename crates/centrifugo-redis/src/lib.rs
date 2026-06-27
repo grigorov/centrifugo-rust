@@ -34,7 +34,9 @@ use redis::aio::ConnectionManager;
 use redis::sentinel::{Sentinel, SentinelNodeConnectionInfo};
 use redis::{AsyncCommands, IntoConnectionInfo, RedisConnectionInfo};
 use tokio::sync::{Mutex, RwLock};
-const PREFIX: &str = "centrifugo";
+
+/// Default Redis key/channel namespace (Go `redis_prefix`).
+pub const DEFAULT_PREFIX: &str = "centrifugo";
 
 // ---- centrifuge-compatible pub/sub wire format (Go interop) ----
 //
@@ -187,11 +189,40 @@ end
 return redis.call("hgetall", KEYS[2])
 "#;
 
+/// Connection + namespace options shared by [`RedisEngine::connect`] and
+/// [`RedisEngine::connect_sentinel`] (mirrors Go's `redis_*` config).
+#[derive(Clone, Default)]
+pub struct RedisOptions {
+    /// AUTH password (applied on top of the address; required for Sentinel AUTH).
+    pub password: Option<String>,
+    /// Database index (`SELECT`).
+    pub db: i64,
+    /// Key/channel namespace; empty → [`DEFAULT_PREFIX`].
+    pub prefix: String,
+    /// History meta-hash TTL in seconds; 0 = never expire.
+    pub history_meta_ttl: u64,
+}
+
+impl RedisOptions {
+    fn prefix_or_default(&self) -> String {
+        if self.prefix.is_empty() {
+            DEFAULT_PREFIX.to_string()
+        } else {
+            self.prefix.clone()
+        }
+    }
+}
+
 pub struct RedisEngine {
     /// Swappable so the Sentinel watchdog can repoint commands at a new master.
     mgr: Arc<RwLock<ConnectionManager>>,
     /// Origin node id stamped on outgoing control commands (centrifuge `Command.uid`).
     node_uid: String,
+    /// Redis key/channel namespace (Go `redis_prefix`, default `centrifugo`).
+    prefix: String,
+    /// History meta-hash TTL in seconds (Go `redis_history_meta_ttl`); 0 = never
+    /// expire (passed as the meta-ttl ARGV to the history Lua).
+    history_meta_ttl: u64,
 }
 
 /// Sentinel node connection info carrying AUTH/db for the resolved master (Go
@@ -307,28 +338,28 @@ fn decode_control(bytes: &[u8], self_uid: &str) -> Option<ControlMessage> {
 /// Subscribe a fresh pub/sub connection to the message pattern + control channel.
 /// Uses centrifuge's `<prefix>.client.*` and `<prefix>.control` so a Go node's
 /// publications AND control commands (unsubscribe/disconnect) are received.
-async fn subscribe(client: &redis::Client) -> anyhow::Result<redis::aio::PubSub> {
+async fn subscribe(client: &redis::Client, prefix: &str) -> anyhow::Result<redis::aio::PubSub> {
     let mut pubsub = client.get_async_pubsub().await?;
-    pubsub.psubscribe(format!("{PREFIX}.client.*")).await?;
-    pubsub.subscribe(format!("{PREFIX}.control")).await?;
+    pubsub.psubscribe(format!("{prefix}.client.*")).await?;
+    pubsub.subscribe(format!("{prefix}.control")).await?;
     Ok(pubsub)
 }
 
 /// Route one pub/sub message (centrifuge-framed publication/join/leave, or a
 /// centrifuge control command for cross-node unsubscribe/disconnect).
-fn dispatch_message(msg: &redis::Msg, route: &RouteFn, self_uid: &str) {
+fn dispatch_message(msg: &redis::Msg, route: &RouteFn, self_uid: &str, prefix: &str) {
     let topic = msg.get_channel_name();
     let payload: Vec<u8> = match msg.get_payload() {
         Ok(p) => p,
         Err(_) => return,
     };
-    if topic == format!("{PREFIX}.control") {
+    if topic == format!("{prefix}.control") {
         if let Some(cmd) = decode_control(&payload, self_uid) {
             route(NodeMessage::Control(cmd));
         }
         return;
     }
-    let Some(channel) = topic.strip_prefix(&format!("{PREFIX}.client.")) else {
+    let Some(channel) = topic.strip_prefix(&format!("{prefix}.client.")) else {
         return;
     };
     let channel = channel.to_string();
@@ -364,10 +395,10 @@ fn dispatch_message(msg: &redis::Msg, route: &RouteFn, self_uid: &str) {
 }
 
 /// Drain a pub/sub connection until it ends (a disconnect), routing each message.
-async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn, self_uid: String) {
+async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn, self_uid: String, prefix: String) {
     let mut stream = pubsub.into_on_message();
     while let Some(msg) = stream.next().await {
-        dispatch_message(&msg, &route, &self_uid);
+        dispatch_message(&msg, &route, &self_uid, &prefix);
     }
 }
 
@@ -378,8 +409,7 @@ impl RedisEngine {
         addr: &str,
         route: RouteFn,
         node_uid: String,
-        password: Option<String>,
-        db: i64,
+        opts: RedisOptions,
     ) -> anyhow::Result<Self> {
         let url = if addr.contains("://") {
             addr.to_string()
@@ -389,17 +419,23 @@ impl RedisEngine {
         // Config `redis_password`/`redis_db` override any creds in the URL (Go
         // applies them on top of the parsed address).
         let mut info = url.into_connection_info()?;
-        if let Some(pw) = password.filter(|p| !p.is_empty()) {
+        if let Some(pw) = opts.password.clone().filter(|p| !p.is_empty()) {
             info.redis.password = Some(pw);
         }
-        if db != 0 {
-            info.redis.db = db;
+        if opts.db != 0 {
+            info.redis.db = opts.db;
         }
+        let prefix = opts.prefix_or_default();
         let client = redis::Client::open(info)?;
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
-        let pubsub = subscribe(&client).await?;
-        tokio::spawn(run_pubsub(pubsub, route, node_uid.clone()));
-        Ok(RedisEngine { mgr, node_uid })
+        let pubsub = subscribe(&client, &prefix).await?;
+        tokio::spawn(run_pubsub(pubsub, route, node_uid.clone(), prefix.clone()));
+        Ok(RedisEngine {
+            mgr,
+            node_uid,
+            prefix,
+            history_meta_ttl: opts.history_meta_ttl,
+        })
     }
 
     /// Connect via Redis Sentinel. The master is resolved at startup, and a
@@ -411,8 +447,7 @@ impl RedisEngine {
         sentinels: &str,
         route: RouteFn,
         node_uid: String,
-        password: Option<String>,
-        db: i64,
+        opts: RedisOptions,
     ) -> anyhow::Result<Self> {
         let mut addrs: Vec<String> = Vec::new();
         for s in sentinels
@@ -440,7 +475,9 @@ impl RedisEngine {
         // AUTH/db for the Sentinel-resolved master (Go authenticates the master
         // from redis_password/redis_db). Without this a password-protected Redis is
         // unreachable in Sentinel mode (NOAUTH on every command).
-        let password = password.filter(|p| !p.is_empty());
+        let password = opts.password.clone().filter(|p| !p.is_empty());
+        let db = opts.db;
+        let prefix = opts.prefix_or_default();
         let node_info = sentinel_node_info(&password, db);
         let mut sentinel = Sentinel::build(addrs)?;
         let client = sentinel
@@ -449,15 +486,16 @@ impl RedisEngine {
         let mgr = Arc::new(RwLock::new(client.get_connection_manager().await?));
         // Subscribe synchronously before returning so an immediate publish isn't
         // missed (no startup race); the watchdog re-subscribes on disconnect.
-        let pubsub = subscribe(&client).await?;
+        let pubsub = subscribe(&client, &prefix).await?;
 
         let sentinel = Arc::new(Mutex::new(sentinel));
         let master = master_name.to_string();
         let mgr_watch = mgr.clone();
         let sub_uid = node_uid.clone();
+        let sub_prefix = prefix.clone();
         tokio::spawn(async move {
             // First run uses the already-subscribed connection.
-            run_pubsub(pubsub, route.clone(), sub_uid.clone()).await;
+            run_pubsub(pubsub, route.clone(), sub_uid.clone(), sub_prefix.clone()).await;
             // On disconnect (e.g. master failover), re-resolve via Sentinel, rebuild
             // the pub/sub subscription, and repoint the command manager.
             loop {
@@ -474,8 +512,11 @@ impl RedisEngine {
                             Ok(m) => *mgr_watch.write().await = m,
                             Err(e) => tracing::warn!("sentinel manager rebuild: {e}"),
                         }
-                        match subscribe(&client).await {
-                            Ok(pubsub) => run_pubsub(pubsub, route.clone(), sub_uid.clone()).await,
+                        match subscribe(&client, &sub_prefix).await {
+                            Ok(pubsub) => {
+                                run_pubsub(pubsub, route.clone(), sub_uid.clone(), sub_prefix.clone())
+                                    .await
+                            }
                             Err(e) => tracing::warn!("sentinel subscribe: {e}"),
                         }
                     }
@@ -483,29 +524,34 @@ impl RedisEngine {
                 }
             }
         });
-        Ok(RedisEngine { mgr, node_uid })
+        Ok(RedisEngine {
+            mgr,
+            node_uid,
+            prefix,
+            history_meta_ttl: opts.history_meta_ttl,
+        })
     }
 
-    fn client_key(channel: &str) -> String {
-        format!("{PREFIX}.client.{channel}")
+    fn client_key(&self, channel: &str) -> String {
+        format!("{}.client.{channel}", self.prefix)
     }
-    fn meta_key(channel: &str) -> String {
-        format!("{PREFIX}.list.meta.{channel}")
+    fn meta_key(&self, channel: &str) -> String {
+        format!("{}.list.meta.{channel}", self.prefix)
     }
-    fn list_key(channel: &str) -> String {
-        format!("{PREFIX}.list.{channel}")
+    fn list_key(&self, channel: &str) -> String {
+        format!("{}.list.{channel}", self.prefix)
     }
-    fn presence_data_key(channel: &str) -> String {
-        format!("{PREFIX}.presence.data.{channel}")
+    fn presence_data_key(&self, channel: &str) -> String {
+        format!("{}.presence.data.{channel}", self.prefix)
     }
-    fn presence_set_key(channel: &str) -> String {
-        format!("{PREFIX}.presence.expire.{channel}")
+    fn presence_set_key(&self, channel: &str) -> String {
+        format!("{}.presence.expire.{channel}", self.prefix)
     }
 
     /// Publish raw framed bytes to a channel's centrifuge message channel.
     async fn publish_frame(&self, channel: &str, payload: Vec<u8>) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn.publish(Self::client_key(channel), payload).await?;
+        let _: () = conn.publish(self.client_key(channel), payload).await?;
         Ok(())
     }
 
@@ -519,11 +565,11 @@ impl RedisEngine {
         let mut conn = self.mgr.read().await.clone();
         let (offset, epoch, pubs): (Option<u64>, Option<String>, Option<Vec<Vec<u8>>>) =
             redis::Script::new(HISTORY)
-                .key(Self::list_key(channel))
-                .key(Self::meta_key(channel))
+                .key(self.list_key(channel))
+                .key(self.meta_key(channel))
                 .arg(1) // include publications
                 .arg(-1) // whole list
-                .arg(0) // meta TTL: never (Go redis_history_meta_ttl default)
+                .arg(self.history_meta_ttl) // meta TTL secs (Go redis_history_meta_ttl)
                 .invoke_async(&mut conn)
                 .await?;
         let top_offset = offset.unwrap_or(0);
@@ -574,13 +620,13 @@ impl Engine for RedisEngine {
             // framed bytes (one atomic op) — so we do NOT publish separately.
             let mut conn = self.mgr.read().await.clone();
             let _: redis::Value = redis::Script::new(ADD_HISTORY)
-                .key(Self::list_key(channel))
-                .key(Self::meta_key(channel))
+                .key(self.list_key(channel))
+                .key(self.meta_key(channel))
                 .arg(payload)
                 .arg(opts.history_size.saturating_sub(1)) // Go list ltrim bound = size-1
                 .arg(opts.history_lifetime) // list TTL (seconds)
-                .arg(Self::client_key(channel)) // publish channel
-                .arg(0) // meta TTL: never
+                .arg(self.client_key(channel)) // publish channel
+                .arg(self.history_meta_ttl) // meta TTL secs (Go redis_history_meta_ttl)
                 .invoke_async(&mut conn)
                 .await?;
             return Ok(());
@@ -593,7 +639,9 @@ impl Engine for RedisEngine {
         // Rust, including this one via its own subscriber) applies it.
         let payload = encode_control(&self.node_uid, &msg);
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn.publish(format!("{PREFIX}.control"), payload).await?;
+        let _: () = conn
+            .publish(format!("{}.control", self.prefix), payload)
+            .await?;
         Ok(())
     }
 
@@ -641,7 +689,7 @@ impl Engine for RedisEngine {
     async fn remove_history(&self, channel: &str) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
         let _: () = conn
-            .del(&[Self::meta_key(channel), Self::list_key(channel)])
+            .del(&[self.meta_key(channel), self.list_key(channel)])
             .await?;
         Ok(())
     }
@@ -660,8 +708,8 @@ impl Engine for RedisEngine {
         let expire_at = now_secs() + ttl_secs;
         let mut conn = self.mgr.read().await.clone();
         let _: () = redis::Script::new(PRESENCE_ADD)
-            .key(Self::presence_set_key(channel))
-            .key(Self::presence_data_key(channel))
+            .key(self.presence_set_key(channel))
+            .key(self.presence_data_key(channel))
             .arg(ttl_secs)
             .arg(expire_at)
             .arg(client_id)
@@ -674,8 +722,8 @@ impl Engine for RedisEngine {
     async fn remove_presence(&self, channel: &str, client_id: &str) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
         let _: () = redis::Script::new(PRESENCE_REM)
-            .key(Self::presence_set_key(channel))
-            .key(Self::presence_data_key(channel))
+            .key(self.presence_set_key(channel))
+            .key(self.presence_data_key(channel))
             .arg(client_id)
             .invoke_async(&mut conn)
             .await?;
@@ -687,8 +735,8 @@ impl Engine for RedisEngine {
         // Prune expired (by the expire zset) then HGETALL the data hash, atomically.
         // Returns a flat [clientID, protobuf ClientInfo, ...] array.
         let flat: Vec<Vec<u8>> = redis::Script::new(PRESENCE_READ)
-            .key(Self::presence_set_key(channel))
-            .key(Self::presence_data_key(channel))
+            .key(self.presence_set_key(channel))
+            .key(self.presence_data_key(channel))
             .arg(now_secs())
             .invoke_async(&mut conn)
             .await?;

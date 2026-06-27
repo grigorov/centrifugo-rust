@@ -201,6 +201,12 @@ async fn main() -> anyhow::Result<()> {
             let node_uid = registry.self_uid().to_string();
             let engine: Arc<dyn Engine> = match settings.engine.as_str() {
                 "redis" => {
+                    let redis_opts = centrifugo_redis::RedisOptions {
+                        password: Some(settings.redis_password.clone()),
+                        db: settings.redis_db,
+                        prefix: settings.redis_prefix.clone(),
+                        history_meta_ttl: settings.redis_history_meta_ttl,
+                    };
                     let e = if !settings.redis_master_name.is_empty() {
                         tracing::info!(
                             "using redis engine via sentinel (master {})",
@@ -211,8 +217,7 @@ async fn main() -> anyhow::Result<()> {
                             &settings.redis_sentinels,
                             make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
-                            Some(settings.redis_password.clone()),
-                            settings.redis_db,
+                            redis_opts,
                         )
                         .await
                         .map_err(|e| anyhow::anyhow!("connect redis via sentinel: {e}"))?
@@ -222,8 +227,7 @@ async fn main() -> anyhow::Result<()> {
                             &settings.redis_address,
                             make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN),
                             node_uid.clone(),
-                            Some(settings.redis_password.clone()),
-                            settings.redis_db,
+                            redis_opts,
                         )
                         .await
                         .map_err(|e| {

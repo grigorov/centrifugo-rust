@@ -35,6 +35,8 @@ pub struct Settings {
     pub redis_sentinels: String,
     pub redis_password: String,
     pub redis_db: i64,
+    pub redis_prefix: String,
+    pub redis_history_meta_ttl: u64,
     pub proxy_connect_endpoint: String,
     pub proxy_refresh_endpoint: String,
     pub proxy_subscribe_endpoint: String,
@@ -135,6 +137,8 @@ impl Settings {
             redis_sentinels: a.redis_sentinels.clone(),
             redis_password: a.redis_password.clone(),
             redis_db: a.redis_db,
+            redis_prefix: a.redis_prefix.clone(),
+            redis_history_meta_ttl: a.redis_history_meta_ttl,
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
             proxy_refresh_endpoint: a.proxy_refresh_endpoint.clone(),
             proxy_subscribe_endpoint: a.proxy_subscribe_endpoint.clone(),
@@ -201,6 +205,8 @@ impl Settings {
             redis_sentinels: fc.redis_sentinels,
             redis_password: fc.redis_password,
             redis_db: fc.redis_db,
+            redis_prefix: fc.redis_prefix,
+            redis_history_meta_ttl: fc.redis_history_meta_ttl,
             proxy_connect_endpoint: fc.proxy_connect_endpoint,
             proxy_refresh_endpoint: fc.proxy_refresh_endpoint,
             proxy_subscribe_endpoint: fc.proxy_subscribe_endpoint,
@@ -305,6 +311,9 @@ fn default_engine() -> String {
 fn default_redis_address() -> String {
     "127.0.0.1:6379".into()
 }
+fn default_redis_prefix() -> String {
+    centrifugo_redis::DEFAULT_PREFIX.into()
+}
 
 #[derive(Deserialize, Default)]
 struct FileConfig {
@@ -348,6 +357,10 @@ struct FileConfig {
     redis_password: String,
     #[serde(default)]
     redis_db: i64,
+    #[serde(default = "default_redis_prefix")]
+    redis_prefix: String,
+    #[serde(default)]
+    redis_history_meta_ttl: u64,
     #[serde(default)]
     proxy_connect_endpoint: String,
     #[serde(default)]

@@ -183,4 +183,10 @@ pub struct ServeArgs {
     /// Redis database number (`SELECT`); defaults to 0.
     #[arg(long = "redis_db", default_value_t = 0)]
     pub redis_db: i64,
+    /// Redis key/channel namespace (must match peer Go nodes for interop).
+    #[arg(long = "redis_prefix", default_value = "centrifugo")]
+    pub redis_prefix: String,
+    /// History meta-hash TTL in seconds (0 = never expire), matching Go.
+    #[arg(long = "redis_history_meta_ttl", default_value_t = 0)]
+    pub redis_history_meta_ttl: u64,
 }
