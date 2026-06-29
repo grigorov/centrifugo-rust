@@ -161,7 +161,7 @@ impl TokenVerifier {
             user: claims.sub.unwrap_or_default(),
             info: resolve_info(claims.b64info, claims.info)?,
             channels: claims.channels.unwrap_or_default(),
-            expire_at: claims.exp.unwrap_or(0),
+            expire_at: expire_at_secs(claims.exp),
         })
     }
 
@@ -173,7 +173,7 @@ impl TokenVerifier {
             client: claims.client.unwrap_or_default(),
             channel: claims.channel.unwrap_or_default(),
             info: resolve_info(claims.b64info, claims.info)?,
-            expire_at: claims.exp.unwrap_or(0),
+            expire_at: expire_at_secs(claims.exp),
             expire_token_only: claims.expire_token_only,
         })
     }
@@ -229,8 +229,10 @@ pub fn verify_admin_token(admin_secret: &str, token: &str) -> bool {
 }
 
 /// exp/nbf validity (matches Go's ErrTokenExpired path; absent claims pass).
-fn check_expiry(exp: Option<i64>, nbf: Option<i64>) -> Result<(), VerifyError> {
-    let now = now_unix();
+/// exp/nbf are floats (NumericDate may be fractional) compared at full precision
+/// against the current second.
+fn check_expiry(exp: Option<f64>, nbf: Option<f64>) -> Result<(), VerifyError> {
+    let now = now_unix() as f64;
     if let Some(exp) = exp {
         if now >= exp {
             return Err(VerifyError::Expired);
@@ -242,6 +244,12 @@ fn check_expiry(exp: Option<i64>, nbf: Option<i64>) -> Result<(), VerifyError> {
         }
     }
     Ok(())
+}
+
+/// Floor a fractional NumericDate to whole seconds for the reported `expire_at`
+/// (matches Go's `NumericDate.Unix()`); absent → 0.
+fn expire_at_secs(exp: Option<f64>) -> i64 {
+    exp.map(|e| e.floor() as i64).unwrap_or(0)
 }
 
 /// `b64info` (base64) overrides `info` (inline JSON) when present.
@@ -304,6 +312,52 @@ mod tests {
     #[test]
     fn future_nbf_is_expired() {
         let token = sign(json!({"sub": "u", "nbf": now_unix() + 10_000}), "secret");
+        assert_eq!(
+            TokenVerifier::hmac("secret").verify_connect_token(&token),
+            Err(VerifyError::Expired)
+        );
+    }
+
+    #[test]
+    fn fractional_exp_is_accepted_and_floored() {
+        // H3: RFC-7519 allows fractional NumericDate; Go accepts it. expire_at is
+        // floored to whole seconds (NumericDate.Unix()).
+        let exp = now_unix() + 10_000;
+        let token = sign(json!({"sub": "u", "exp": exp as f64 + 0.5}), "secret");
+        let ct = TokenVerifier::hmac("secret")
+            .verify_connect_token(&token)
+            .unwrap();
+        assert_eq!(ct.expire_at, exp);
+    }
+
+    #[test]
+    fn expired_fractional_exp_is_expired_not_invalid() {
+        // H3: an expired fractional token must classify as Expired (→ error 109 /
+        // refresh), never Invalid (→ 3002 no-reconnect close).
+        let token = sign(json!({"sub": "u", "exp": (now_unix() - 100) as f64 + 0.5}), "secret");
+        assert_eq!(
+            TokenVerifier::hmac("secret").verify_connect_token(&token),
+            Err(VerifyError::Expired)
+        );
+    }
+
+    #[test]
+    fn string_exp_is_accepted() {
+        // H3: numeric-string NumericDate is accepted (Go parses via json.Number).
+        let exp = now_unix() + 10_000;
+        let token = sign(json!({"sub": "u", "exp": exp.to_string()}), "secret");
+        let ct = TokenVerifier::hmac("secret")
+            .verify_connect_token(&token)
+            .unwrap();
+        assert_eq!(ct.expire_at, exp);
+    }
+
+    #[test]
+    fn fractional_future_nbf_is_expired() {
+        let token = sign(
+            json!({"sub": "u", "nbf": (now_unix() + 10_000) as f64 + 0.5}),
+            "secret",
+        );
         assert_eq!(
             TokenVerifier::hmac("secret").verify_connect_token(&token),
             Err(VerifyError::Expired)
