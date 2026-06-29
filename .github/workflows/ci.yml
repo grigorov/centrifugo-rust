@@ -3,6 +3,9 @@ on: [push, pull_request]
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # Safety net: the suite finishes in minutes once the caches are warm; this only
+    # bounds a pathological cold run or a hung test so the job never lingers for hours.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +39,11 @@ jobs:
             || echo "redis-server unavailable; Redis tests will skip"
 
       # Build the real Centrifugo v2.8.6 as a differential oracle (clones the tag +
-      # `go build`); golden/interop tests skip if this is unavailable.
+      # `go build`); golden/interop tests skip if this is unavailable. Bounded +
+      # non-fatal so a slow clone/module fetch can't stall the job.
       - name: build go oracle
+        timeout-minutes: 12
+        continue-on-error: true
         run: bash conformance/go-oracle/build.sh || echo "go oracle build failed; differential tests will skip"
 
       # Warm the go-client module cache so the live-SDK probe (m12) is fast/reliable;
@@ -46,4 +52,5 @@ jobs:
         run: (cd conformance/go-client && go mod download) || echo "go-client module download failed; m12 will skip"
 
       - name: test
+        timeout-minutes: 25
         run: cargo test --workspace

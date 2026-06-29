@@ -4,12 +4,22 @@
 //! the wire-visible side of the project's hard "10k/100k users don't block each
 //! other" requirement.
 
-use conformance::{api_post, Server, WsJsonClient};
+use std::time::Duration;
+
+use conformance::{Server, WsJsonClient};
 
 const KEY: &str = "slowkey";
 
 #[tokio::test]
 async fn slow_consumer_is_disconnected_with_3008() {
+    // Hard overall bound: a misbehaving runner fails fast with a clear message
+    // instead of hanging the job indefinitely.
+    tokio::time::timeout(Duration::from_secs(60), run())
+        .await
+        .expect("slow-consumer test exceeded 60s");
+}
+
+async fn run() {
     let s = Server::start_with(&["--client_insecure", "--api_key", KEY]).await;
 
     // A healthy subscriber (will keep reading) and a slow one (stops reading).
@@ -22,15 +32,23 @@ async fn slow_consumer_is_disconnected_with_3008() {
     slow.subscribe(2, "room").await;
 
     // Flood via the HTTP API (no per-publish round-trip). The slow client never
-    // reads, so its 256-deep write queue fills and the OS socket buffer backs up.
+    // reads, so its 256-deep write queue + socket buffers fill and it is dropped.
+    //
+    // Reuse ONE keep-alive client for the whole flood: a fresh `reqwest::Client`
+    // per publish would open 5000 short-lived TCP connections in a burst, which on
+    // a constrained CI runner exhausts ephemeral ports / piles up TIME_WAIT sockets
+    // and stalls for minutes. A pooled client keeps it to a handful of connections.
+    let client = reqwest::Client::new();
     let payload = "x".repeat(200);
     for i in 0..5000u32 {
-        api_post(
-            &s.http,
-            KEY,
-            &format!(r#"{{"method":"publish","params":{{"channel":"room","data":{{"i":{i},"p":"{payload}"}}}}}}"#),
-        )
-        .await;
+        let _ = client
+            .post(format!("{}/api", s.http))
+            .header("Authorization", format!("apikey {KEY}"))
+            .body(format!(
+                r#"{{"method":"publish","params":{{"channel":"room","data":{{"i":{i},"p":"{payload}"}}}}}}"#
+            ))
+            .send()
+            .await;
     }
 
     // The broadcaster was never blocked: the healthy subscriber still receives.
