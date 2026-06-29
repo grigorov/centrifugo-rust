@@ -145,8 +145,16 @@ pub struct StreamPosition {
 }
 
 /// Opaque per-stream token; only stability + change-on-recreate matter.
+/// A fresh stream epoch: 4 chars over `[a-zA-Z]`, matching Go's
+/// `memstream.genEpoch()` (`randString(4)`). The epoch is an opaque token SDKs
+/// only echo back, so only the format matters; randomness is drawn from a v4 UUID
+/// to avoid pulling in an RNG dependency.
 pub(crate) fn new_epoch() -> String {
-    uuid::Uuid::new_v4().simple().to_string()[..10].to_string()
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    uuid::Uuid::new_v4().into_bytes()[..4]
+        .iter()
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect()
 }
 
 pub(crate) fn now_unix() -> i64 {
@@ -746,6 +754,19 @@ mod tests {
     use centrifugo_protocol::{Command, MethodType, ProtocolType, Raw};
     use std::time::Duration;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn new_epoch_is_four_alpha_chars() {
+        // L6: epoch format matches Go's memstream.genEpoch (4 chars, [a-zA-Z]).
+        for _ in 0..50 {
+            let e = new_epoch();
+            assert_eq!(e.len(), 4, "epoch must be 4 chars: {e}");
+            assert!(
+                e.chars().all(|c| c.is_ascii_alphabetic()),
+                "epoch must be [a-zA-Z]: {e}"
+            );
+        }
+    }
 
     #[test]
     fn node_registry_add_list_and_prune() {
