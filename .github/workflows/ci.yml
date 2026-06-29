@@ -15,7 +15,7 @@ jobs:
       # Go oracle; its module cache is keyed on the go-client checksums.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
           cache-dependency-path: conformance/go-client/go.sum
 
       - name: fmt
