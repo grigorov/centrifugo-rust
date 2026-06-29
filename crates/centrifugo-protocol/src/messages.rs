@@ -18,6 +18,18 @@ use crate::raw::Raw;
 fn is_false(b: &bool) -> bool {
     !*b
 }
+
+/// Deserialize a scalar that may arrive as an explicit JSON `null`, coercing
+/// null to the type's zero value — matching Go's `encoding/json`, which decodes
+/// `null` into a scalar/string as the zero value. Paired with `#[serde(default)]`
+/// (which covers an absent key), this accepts `{"seq":null}` like Go does.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
@@ -67,15 +79,35 @@ pub struct SubscribeRequest {
     pub channel: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub token: String,
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_false"
+    )]
     pub recover: bool,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_zero_u32"
+    )]
     pub seq: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_zero_u32"
+    )]
     pub gen: u32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub epoch: String,
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "is_zero_u64"
+    )]
     pub offset: u64,
 }
 
@@ -277,6 +309,22 @@ mod tests {
 
     fn raw(s: &str) -> Raw {
         Raw::from_bytes(s.as_bytes())
+    }
+
+    #[test]
+    fn subscribe_request_tolerates_explicit_null_recovery_fields() {
+        // L2: hand-rolled JSON clients may send explicit null for seq/gen/epoch;
+        // Go decodes null as the zero value. Must not error.
+        let r: SubscribeRequest = serde_json::from_str(
+            r#"{"channel":"news","epoch":null,"seq":null,"gen":null,"offset":null,"recover":null}"#,
+        )
+        .expect("explicit nulls must decode as zero values");
+        assert_eq!(r.channel, "news");
+        assert_eq!(r.seq, 0);
+        assert_eq!(r.gen, 0);
+        assert_eq!(r.epoch, "");
+        assert_eq!(r.offset, 0);
+        assert!(!r.recover);
     }
 
     #[test]

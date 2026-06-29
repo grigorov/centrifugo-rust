@@ -41,6 +41,25 @@ async fn empty_unsubscribe_channel_disconnects_bad_request() {
 }
 
 #[tokio::test]
+async fn subscribe_tolerates_explicit_null_recovery_fields() {
+    // L2: a hand-rolled client sending explicit null for seq/gen/epoch must be
+    // accepted (Go decodes null as zero), not rejected with 107.
+    let s = Server::start().await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(
+        r#"{"id":2,"method":1,"params":{"channel":"news","epoch":null,"seq":null,"gen":null}}"#,
+    )
+    .await;
+    let r = c.next_json().await;
+    assert!(
+        r["error"].is_null(),
+        "null recovery fields must not error: {r}"
+    );
+    assert_eq!(r["id"], 2);
+}
+
+#[tokio::test]
 async fn empty_sub_refresh_token_is_bad_request_reply() {
     let s = Server::start().await;
     let mut c = WsJsonClient::connect(&s.ws_url()).await;

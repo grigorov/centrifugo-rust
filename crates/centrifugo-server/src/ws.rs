@@ -156,6 +156,12 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
             Message::Close(_) => break,
             _ => continue, // pong/ping handled by tungstenite
         };
+        // Go Client.Handle closes 3003 on a zero-length frame (before decoding);
+        // decode_commands would otherwise return an empty batch and stay open.
+        if frame.is_empty() {
+            let _ = tx.send(Out::Close(Disconnect::bad_request())).await;
+            break;
+        }
         let cmds = match decode_commands(proto, &frame) {
             Ok(cmds) => cmds,
             Err(_) => {

@@ -69,6 +69,18 @@ async fn zero_id_non_send_closes_bad_request() {
     assert_eq!(reason, BAD_REQUEST_REASON);
 }
 
+// L1: a zero-length data frame -> close 3003 (before decoding).
+#[tokio::test]
+async fn empty_frame_closes_bad_request() {
+    let s = Server::start_with(&["--client_insecure"]).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw("").await; // zero-length text frame
+    let (code, reason) = c.next_close().await;
+    assert_eq!(code, 3003, "empty frame must close 3003");
+    assert_eq!(reason, BAD_REQUEST_REASON);
+}
+
 // M3: RPC when no RPC proxy is configured -> ErrorNotAvailable (108), not 104.
 #[tokio::test]
 async fn rpc_without_proxy_not_available() {

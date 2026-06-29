@@ -207,6 +207,13 @@ async fn run_session(
                 continue;
             }
         };
+        // Go Client.Handle closes 3003 on a zero-length frame before decoding.
+        if raw.is_empty() {
+            let _ = reply_tx
+                .send(Out::Close(centrifugo_protocol::Disconnect::bad_request()))
+                .await;
+            break;
+        }
         let cmds = match decode_commands(ProtocolType::Json, raw.as_bytes()) {
             Ok(c) => c,
             Err(_) => {
