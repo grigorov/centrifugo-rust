@@ -881,8 +881,11 @@ mod tests {
         let mut c = node.new_client(tx, ProtocolType::Json);
         let r1 = c.handle_command(&connect_cmd(1)).await;
         assert!(r1.replies[0].error.is_none());
+        // M1: a second CONNECT closes with DisconnectBadRequest (3003), not a 107
+        // in-band reply (Go connectCmd returns DisconnectBadRequest).
         let r2 = c.handle_command(&connect_cmd(2)).await;
-        assert_eq!(r2.replies[0].error.as_ref().unwrap().code, 107); // bad request
+        assert!(r2.replies.is_empty());
+        assert_eq!(r2.disconnect.as_ref().unwrap().code, 3003);
     }
 
     #[tokio::test]

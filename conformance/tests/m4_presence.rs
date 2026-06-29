@@ -64,7 +64,10 @@ async fn self_join_follows_subscribe_reply() {
 
     // First frame must be the subscribe reply (carries id:2, no push `type`).
     let first = a.next_json().await;
-    assert_eq!(first["id"], 2, "first frame must be the subscribe reply: {first}");
+    assert_eq!(
+        first["id"], 2,
+        "first frame must be the subscribe reply: {first}"
+    );
     assert!(
         first["result"].get("type").is_none(),
         "first frame must not be a push: {first}"

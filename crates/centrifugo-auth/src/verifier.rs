@@ -334,7 +334,10 @@ mod tests {
     fn expired_fractional_exp_is_expired_not_invalid() {
         // H3: an expired fractional token must classify as Expired (→ error 109 /
         // refresh), never Invalid (→ 3002 no-reconnect close).
-        let token = sign(json!({"sub": "u", "exp": (now_unix() - 100) as f64 + 0.5}), "secret");
+        let token = sign(
+            json!({"sub": "u", "exp": (now_unix() - 100) as f64 + 0.5}),
+            "secret",
+        );
         assert_eq!(
             TokenVerifier::hmac("secret").verify_connect_token(&token),
             Err(VerifyError::Expired)

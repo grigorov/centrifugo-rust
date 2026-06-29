@@ -167,6 +167,13 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
         let mut replies = Vec::new();
         let mut disconnect = None;
         for c in &cmds {
+            // Go Client.Handle: a reply-expecting command (any method except Send)
+            // with id==0 is a protocol violation -> close 3003 ("command ID
+            // required"). Applies to CONNECT too.
+            if c.id == 0 && c.method != centrifugo_protocol::MethodType::Send {
+                disconnect = Some(Disconnect::bad_request());
+                break;
+            }
             let outcome = client.handle_command(c).await;
             replies.extend(outcome.replies);
             if let Some(d) = outcome.disconnect {

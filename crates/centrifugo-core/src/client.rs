@@ -212,20 +212,29 @@ impl Client {
             // SEND is fire-and-forget: no reply.
             MethodType::Send => CommandOutcome::replies(vec![]),
             MethodType::Rpc => self.on_rpc(cmd).await,
-            MethodType::Presence => CommandOutcome::replies(self.on_presence(cmd).await),
-            MethodType::PresenceStats => CommandOutcome::replies(self.on_presence_stats(cmd).await),
-            MethodType::History => CommandOutcome::replies(self.on_history(cmd).await),
+            MethodType::Presence => self.on_presence(cmd).await,
+            MethodType::PresenceStats => self.on_presence_stats(cmd).await,
+            MethodType::History => self.on_history(cmd).await,
             MethodType::SubRefresh => self.on_sub_refresh(cmd),
+            // Unrecognized method int: reply ErrorMethodNotFound (104) and keep the
+            // connection open (Go handleCommand switch default), rather than closing.
+            MethodType::Unknown => {
+                CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())])
+            }
         }
     }
 
     async fn on_connect(&mut self, cmd: &Command) -> CommandOutcome {
+        // Go connectCmd: a second CONNECT on an already-authenticated connection
+        // is DisconnectBadRequest (3003), not an in-band 107 error reply.
         if self.authenticated {
-            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::bad_request())]);
+            return CommandOutcome::disconnect(Disconnect::bad_request());
         }
         let req: ConnectRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
 
         // The client id is assigned before auth so a connect-proxy can receive it.
@@ -409,7 +418,9 @@ impl Client {
     async fn on_subscribe(&mut self, cmd: &Command) -> CommandOutcome {
         let req: SubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         // Go validateSubscribeRequest: empty channel -> DisconnectBadRequest (3003).
         if req.channel.is_empty() {
@@ -587,20 +598,22 @@ impl Client {
         CommandOutcome::replies(vec![reply])
     }
 
-    async fn on_history(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_history(&mut self, cmd: &Command) -> CommandOutcome {
         let req: HistoryRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         let history_enabled = match self.node.channel_options(&req.channel) {
             Some(o) => o.history_enabled(),
-            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+            None => {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())])
+            }
         };
         if !history_enabled {
-            return vec![Reply::err(cmd.id, Error::not_available())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
         }
         if !self.is_subscribed(&req.channel) {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         let (mut publications, _top) = self.node.history(&req.channel).await;
         if self.node.use_seq_gen() {
@@ -611,13 +624,15 @@ impl Client {
             }
         }
         let result = HistoryResult { publications };
-        vec![ok_reply(self.proto, cmd.id, &result)]
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
 
     async fn on_publish(&mut self, cmd: &Command) -> CommandOutcome {
         let req: PublishRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         // Go (centrifuge handlePublish): empty channel or empty data is rejected
         // with DisconnectBadRequest (3003).
@@ -689,7 +704,9 @@ impl Client {
     async fn on_unsubscribe(&mut self, cmd: &Command) -> CommandOutcome {
         let req: UnsubscribeRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         // Go handleUnsubscribe: an empty channel is DisconnectBadRequest (3003).
         if req.channel.is_empty() {
@@ -718,48 +735,52 @@ impl Client {
         let _ = self.node.engine().unsubscribe(channel).await;
     }
 
-    async fn on_presence(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_presence(&mut self, cmd: &Command) -> CommandOutcome {
         let req: PresenceRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         let (presence, disable_for_client) = match self.node.channel_options(&req.channel) {
             Some(o) => (o.presence, o.presence_disable_for_client),
-            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+            None => {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())])
+            }
         };
         if !presence || disable_for_client {
-            return vec![Reply::err(cmd.id, Error::not_available())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
         }
         if !self.is_subscribed(&req.channel) {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         let result = PresenceResult {
             presence: self.node.presence(&req.channel).await,
         };
-        vec![ok_reply(self.proto, cmd.id, &result)]
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
 
-    async fn on_presence_stats(&mut self, cmd: &Command) -> Vec<Reply> {
+    async fn on_presence_stats(&mut self, cmd: &Command) -> CommandOutcome {
         let req: PresenceStatsRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return vec![Reply::err(cmd.id, e)],
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         let (presence, disable_for_client) = match self.node.channel_options(&req.channel) {
             Some(o) => (o.presence, o.presence_disable_for_client),
-            None => return vec![Reply::err(cmd.id, Error::unknown_channel())],
+            None => {
+                return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())])
+            }
         };
         if !presence || disable_for_client {
-            return vec![Reply::err(cmd.id, Error::not_available())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
         }
         if !self.is_subscribed(&req.channel) {
-            return vec![Reply::err(cmd.id, Error::permission_denied())];
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::permission_denied())]);
         }
         let (num_clients, num_users) = self.node.presence_stats(&req.channel).await;
         let result = PresenceStatsResult {
             num_clients,
             num_users,
         };
-        vec![ok_reply(self.proto, cmd.id, &result)]
+        CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
 
     /// Re-assert presence for every presence-enabled subscription. Driven by the
@@ -821,7 +842,9 @@ impl Client {
     async fn on_refresh(&mut self, cmd: &Command) -> CommandOutcome {
         let req: RefreshRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         // Go handleRefresh: an empty refresh token is DisconnectBadRequest (3003)
         // before any handler runs — including the refresh proxy.
@@ -924,12 +947,16 @@ impl Client {
     /// error/disconnect; without one, RPC is method-not-found (matching Go's
     /// behavior when no rpc handler is registered).
     async fn on_rpc(&mut self, cmd: &Command) -> CommandOutcome {
+        // Go registers OnRPC only when an RPC proxy exists; without it handleRPC
+        // returns ErrorNotAvailable (108), not ErrorMethodNotFound (104).
         let Some(proxy) = self.node.proxies().rpc.clone() else {
-            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::method_not_found())]);
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
         };
         let req: RpcRequest = match parse_params(self.proto, &cmd.params) {
             Ok(r) => r,
-            Err(e) => return CommandOutcome::replies(vec![Reply::err(cmd.id, e)]),
+            // Go: malformed command params -> DisconnectBadRequest (3003), never
+            // an in-band error reply (handleCommand closes the connection).
+            Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
         let mut preq = self.proxy_request();
         preq.method = req.method;

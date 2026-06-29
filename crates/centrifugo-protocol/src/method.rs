@@ -22,6 +22,11 @@ pub enum MethodType {
     Rpc = 9,
     Refresh = 10,
     SubRefresh = 11,
+    /// Any method int this build does not recognize. Go's protocol decodes
+    /// `MethodType(val)` for *any* int and handleCommand's switch default returns
+    /// ErrorMethodNotFound (104); we keep the connection open and reply 104 rather
+    /// than failing frame decode (which would drop the whole batch + close 3003).
+    Unknown = 12,
 }
 
 impl MethodType {
@@ -40,6 +45,8 @@ impl MethodType {
     }
 
     fn from_u64(n: u64) -> Option<Self> {
+        // Any unrecognized int decodes to `Unknown` (handled as 104), never an
+        // error — matches Go's tolerant `MethodType(val)` decode.
         Some(match n {
             0 => Self::Connect,
             1 => Self::Subscribe,
@@ -53,7 +60,7 @@ impl MethodType {
             9 => Self::Rpc,
             10 => Self::Refresh,
             11 => Self::SubRefresh,
-            _ => return None,
+            _ => Self::Unknown,
         })
     }
 
@@ -188,6 +195,21 @@ mod tests {
             serde_json::from_str::<MethodType>("\"PUBLISH\"").unwrap(),
             MethodType::Publish
         );
+    }
+
+    #[test]
+    fn unknown_method_int_decodes_to_unknown_not_error() {
+        // H5: an out-of-range method int must decode (to Unknown), never error,
+        // so the command reaches the handler and gets a 104 reply.
+        assert_eq!(
+            serde_json::from_str::<MethodType>("99").unwrap(),
+            MethodType::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<MethodType>("12").unwrap(),
+            MethodType::Unknown
+        );
+        assert_eq!(MethodType::from_i32(99), Some(MethodType::Unknown));
     }
 
     #[test]

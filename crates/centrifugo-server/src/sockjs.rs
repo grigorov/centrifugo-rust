@@ -219,6 +219,12 @@ async fn run_session(
         let mut replies = Vec::new();
         let mut disconnect = None;
         for c in &cmds {
+            // Go Client.Handle: a reply-expecting command (any method except Send)
+            // with id==0 -> close 3003 ("command ID required"). Applies to CONNECT.
+            if c.id == 0 && c.method != centrifugo_protocol::MethodType::Send {
+                disconnect = Some(centrifugo_protocol::Disconnect::bad_request());
+                break;
+            }
             let outcome = client.handle_command(c).await;
             replies.extend(outcome.replies);
             if let Some(d) = outcome.disconnect {

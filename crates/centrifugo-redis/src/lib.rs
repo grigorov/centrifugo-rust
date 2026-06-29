@@ -418,7 +418,10 @@ fn url_specifies_password(url: &str) -> bool {
 /// (`redis://host:port/4`). A bare authority or a trailing `/` is not explicit.
 fn url_specifies_db(url: &str) -> bool {
     let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
-    let after_scheme = after_scheme.split(['?', '#']).next().unwrap_or(after_scheme);
+    let after_scheme = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
     match after_scheme.split_once('/') {
         Some((_authority, db)) => !db.is_empty(),
         None => false,
@@ -845,7 +848,11 @@ mod tests {
         // H4: URL db/password win over config when the URL specifies them.
         let (db, pw) = effective("redis://:urlpw@127.0.0.1:6399/4", 7, Some("testpw"));
         assert_eq!(db, 4, "URL path db must win over config redis_db");
-        assert_eq!(pw.as_deref(), Some("urlpw"), "URL password must win over config");
+        assert_eq!(
+            pw.as_deref(),
+            Some("urlpw"),
+            "URL password must win over config"
+        );
 
         // Explicit db 0 in the URL wins (config db 7 ignored).
         let (db, _) = effective("redis://127.0.0.1:6399/0", 7, None);
@@ -854,7 +861,11 @@ mod tests {
         // URL omits db/password -> config applies as default.
         let (db, pw) = effective("redis://127.0.0.1:6399", 7, Some("testpw"));
         assert_eq!(db, 7, "config redis_db applies when URL omits a db path");
-        assert_eq!(pw.as_deref(), Some("testpw"), "config password applies when URL omits one");
+        assert_eq!(
+            pw.as_deref(),
+            Some("testpw"),
+            "config password applies when URL omits one"
+        );
     }
 
     #[test]
