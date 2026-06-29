@@ -203,7 +203,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ### What each test file covers
 
-The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **205 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **241 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
 
 **Core wire compatibility — M0–M12**
 
@@ -237,7 +237,7 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 | `m20_redis_sentinel` | Redis Sentinel master discovery |
 | `m21_admin_ui` | admin web UI + `admin_web_path` |
 
-**Audit fixes, post-audit features & Go⇄Rust interop — m22–m25**
+**Audit fixes, post-audit features, drop-in & Go⇄Rust interop — m22–m28**
 
 | File | Covers |
 |---|---|
@@ -245,6 +245,9 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 | `m23_server_api` | server-side `unsubscribe` / `disconnect` API (cluster-wide) |
 | `m24_personal` | personal channels (`user_subscribe_to_personal`) |
 | `m25_go_rust_cluster` | **Go ⇄ Rust on one Redis** — pub/sub, history, presence, control (unsubscribe/disconnect), and node-info, both directions |
+| `m26_dropin` | drop-in launch parity (unknown flags don't abort startup, admin via env, gentoken TTL, checktoken) |
+| `m27_protocol_semantics` | post-audit error/disconnect semantics (malformed params → 3003, unknown method → 104, 2nd CONNECT/id==0/empty frame → 3003, RPC → 108, bare PING reply) |
+| `m28_frame_coalescing` | WS writer coalesces up to 4 messages per frame without loss/reorder |
 
 ---
 
@@ -294,13 +297,14 @@ Under this load Go sheds ~1% of deliveries (slow-consumer protection drops laggi
 
 ## Status
 
-Development ran across stages **M0–M25** (see the test-file breakdown above):
+Development ran across stages **M0–M28** (see the test-file breakdown above):
 
 - **M0–M12** — core wire compatibility (transports, commands, history/recovery, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, metrics, CLI, live-SDK proof).
 - **m13–m21** — full Go-parity phases (`#`-channels, SUB_REFRESH, server-side channels, presence TTL, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI).
 - **m22–m25** — adversarial-audit fixes + post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics) and **full Go⇄Rust Redis interop** (pub/sub + history + presence + control + node-info).
+- **m26–m28** — drop-in launch parity, post-audit protocol semantics (see below), and WS frame coalescing.
 
-All complete: **205 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
+All complete: **241 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
 
 A **second adversarial audit** (after the interop, control, and refresh changes) found 13 real divergences from the Go reference — all fixed, each with a test:
 
@@ -313,3 +317,20 @@ A **second adversarial audit** (after the interop, control, and refresh changes)
 - **B7** — node name = `hostname_port`/config `name` (not the UID);
 - **B12** — control signals are no longer dropped silently + expiry moved off the 25s presence tick onto a dedicated timer;
 - **B13** — `redis_prefix` and `redis_history_meta_ttl` are now configurable.
+
+A **third pass — finding implementation divergences from Go** (adversarial audit against the Go sources + the live Go oracle) found **17 divergences** (all on abnormal-input/config paths; the steady-state pub/sub/recovery path had none). All fixed, each with a test:
+
+- **H2** — the self-Join now arrives *after* the subscribe reply (Go flushes the reply, then publishes Join), not before — the only HIGH on a common path;
+- **H3** — fractional/string JWT `exp`/`nbf` (float NumericDate emitted by common JWT libraries) is accepted; an expired such token → 109 (refresh), not 3002;
+- **H4** — `redis_url` db/password from the URL win over config (like Go) — otherwise a silent split-brain in a mixed Go/Rust cluster;
+- **H1/H5/M1/M2/M3** — error/disconnect semantics: malformed params → close 3003 (not 107); unknown method → reply 104 (connection stays open, not 3003); a 2nd CONNECT → 3003; `id==0` (non-Send) → 3003; RPC with no proxy → 108;
+- **M4** — the PING reply is a bare `{"id":N}` with no `result:{}` (JSON parity);
+- **M5** — env vars beat the config file (viper precedence `flag > env > file`);
+- **M6** — config validation at startup/`checkconfig` (history recovery requires size+lifetime; namespace-name regex/uniqueness; personal-namespace existence) — exit 1, like Go;
+- **L1/L2** — empty frame → 3003; explicit `null` for seq/gen/epoch is treated as zero (like `encoding/json`);
+- **L3** — `memory_history_meta_ttl` implemented (an idle stream resets → fresh epoch/offset);
+- **L4** — JWKS is RSA + `use:sig` only (matching Go, which rejects non-RSA/non-sig keys);
+- **L5** — the WS writer coalesces up to 4 messages per frame (like Go);
+- **L6** — epoch format is 4 chars `[a-zA-Z]` (like `memstream.genEpoch`).
+
+The full post-audit report is in `docs/POSTAUDIT_v2.8.6.md` (only L7 — comma-sharded Redis — is left out of scope by design, per the Sentinel-only decision).

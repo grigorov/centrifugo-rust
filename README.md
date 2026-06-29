@@ -203,7 +203,7 @@ cargo test --workspace
 
 ### Что проверяет каждый файл тестов
 
-Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 205 тестов, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
+Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 241 тест, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
 
 **Базовая проводная совместимость — M0–M12**
 
@@ -237,7 +237,7 @@ cargo test --workspace
 | `m20_redis_sentinel` | обнаружение мастера через Redis Sentinel |
 | `m21_admin_ui` | admin web UI + `admin_web_path` |
 
-**Исправления аудита, пост-аудит фичи и interop Go⇄Rust — m22–m25**
+**Исправления аудита, пост-аудит фичи, drop-in и interop Go⇄Rust — m22–m28**
 
 | Файл | Что проверяет |
 |---|---|
@@ -245,6 +245,9 @@ cargo test --workspace
 | `m23_server_api` | серверные `unsubscribe` / `disconnect` через API (по всему кластеру) |
 | `m24_personal` | персональные каналы (`user_subscribe_to_personal`) |
 | `m25_go_rust_cluster` | **Go ⇄ Rust на одном Redis** — pub/sub, история, presence, control (unsubscribe/disconnect) и node-info, в обе стороны |
+| `m26_dropin` | паритет запуска drop-in (неизвестные флаги не валят старт, admin через env, TTL gentoken, checktoken) |
+| `m27_protocol_semantics` | пост-аудит семантика ошибок/disconnect (битые params → 3003, неизвестный метод → 104, 2-й CONNECT/id==0/пустой кадр → 3003, RPC → 108, голый PING-reply) |
+| `m28_frame_coalescing` | WS-writer коалесцирует до 4 сообщений в кадр без потерь/перестановок |
 
 ---
 
@@ -294,13 +297,14 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 
 ## Статус
 
-Разработка шла по этапам **M0–M25** (см. разбивку по файлам тестов выше):
+Разработка шла по этапам **M0–M28** (см. разбивку по файлам тестов выше):
 
 - **M0–M12** — базовая проводная совместимость (транспорты, команды, история/восстановление, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, метрики, CLI, доказательство живым SDK).
 - **m13–m21** — фазы полного Go-паритета (`#`-каналы, SUB_REFRESH, server-side каналы, TTL presence, гранулярные прокси, Protobuf HTTP API, разрешение публикации, Redis Sentinel, admin web UI).
 - **m22–m25** — исправления adversarial-аудита + пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам) и **полный interop Go⇄Rust на Redis** (pub/sub + история + presence + control + node-info).
+- **m26–m28** — drop-in паритет запуска, пост-аудит семантика протокола (см. ниже) и коалесцирование WS-кадров.
 
-Всё завершено: **205 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
+Всё завершено: **241 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
 
 **Повторный adversarial-аудит** (после interop-, control- и refresh-изменений) нашёл 13 реальных расхождений с эталоном на Go — все исправлены, каждое с тестом:
 
@@ -313,3 +317,20 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 - **B7** — имя узла = `hostname_port`/конфиг `name` (а не UID);
 - **B12** — control-сигналы не теряются молча + проверка истечения вынесена с 25-с presence-тика на отдельный таймер;
 - **B13** — `redis_prefix` и `redis_history_meta_ttl` стали конфигурируемыми.
+
+**Третий проход — поиск расхождений реализации с Go** (adversarial-аудит против исходников Go + живого Go-оракула) нашёл **17 расхождений** (все на путях аномального ввода/конфига; steady-state pub/sub/recovery — без расхождений). Все исправлены, каждое с тестом:
+
+- **H2** — self-Join теперь приходит *после* subscribe-reply (Go флашит reply, затем публикует Join), а не до — единственное HIGH на обычном пути;
+- **H3** — дробный/строковый JWT `exp`/`nbf` (float NumericDate от обычных JWT-библиотек) принимается; истёкший такой токен → 109 (refresh), а не 3002;
+- **H4** — `redis_url` db/пароль из URL побеждают config (как в Go) — иначе тихий split-brain в смешанном Go/Rust кластере;
+- **H1/H5/M1/M2/M3** — семантика ошибок/disconnect: битые params → close 3003 (не 107); неизвестный метод → reply 104 (коннект жив, не 3003); второй CONNECT → 3003; `id==0` (не Send) → 3003; RPC без прокси → 108;
+- **M4** — PING-reply — голый `{"id":N}` без `result:{}` (JSON-паритет);
+- **M5** — env-переменные побеждают config-файл (precedence viper `flag > env > file`);
+- **M6** — валидация конфига при старте/`checkconfig` (history-recovery требует size+lifetime; regex/уникальность имён namespace; существование personal-namespace) — exit 1, как в Go;
+- **L1/L2** — пустой кадр → 3003; explicit `null` для seq/gen/epoch трактуется как ноль (как `encoding/json`);
+- **L3** — `memory_history_meta_ttl` реализован (простаивающий стрим сбрасывается → свежий epoch/offset);
+- **L4** — JWKS только RSA + `use:sig` (как Go отвергает не-RSA/не-sig ключи);
+- **L5** — WS-writer коалесцирует до 4 сообщений в кадр (как Go);
+- **L6** — формат epoch — 4 символа `[a-zA-Z]` (как `memstream.genEpoch`).
+
+Полный отчёт пост-аудита — `docs/POSTAUDIT_v2.8.6.md` (вне scope осознанно оставлено только L7 — шардинг Redis по запятой, см. решение про Sentinel-only).

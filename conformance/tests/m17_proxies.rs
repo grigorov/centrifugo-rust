@@ -68,14 +68,16 @@ async fn rpc_proxy_ack_only_is_success_without_data() {
 }
 
 #[tokio::test]
-async fn rpc_without_proxy_is_method_not_found() {
+async fn rpc_without_proxy_is_not_available() {
+    // Post-audit M3: with no RPC proxy, Go registers no OnRPC handler and returns
+    // ErrorNotAvailable (108), not ErrorMethodNotFound (104).
     let s = Server::start().await; // insecure, no rpc proxy
     let mut c = WsJsonClient::connect(&s.ws_url()).await;
     c.connect_command().await;
     c.send_raw(r#"{"id":2,"method":9,"params":{"method":"x"}}"#)
         .await;
     let r = c.next_json().await;
-    assert_eq!(r["error"]["code"], 104, "expected method not found: {r}");
+    assert_eq!(r["error"]["code"], 108, "expected not available: {r}");
 }
 
 // ---- Connect proxy (server-side channels) ----
