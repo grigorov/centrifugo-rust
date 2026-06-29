@@ -287,8 +287,10 @@ impl Settings {
             .map(|n| (n.name, n.options.into()))
             .collect();
         Ok(Settings {
-            address: a.address.clone(),
-            port: a.port,
+            // Config-file address/port win when present (Go honors them); otherwise
+            // fall back to the --address/--port flags (or their env vars).
+            address: fc.address.clone().unwrap_or_else(|| a.address.clone()),
+            port: fc.port.unwrap_or(a.port),
             name: fc.name,
             client_insecure: fc.client_insecure,
             client_anonymous: fc.client_anonymous,
@@ -423,6 +425,12 @@ fn default_redis_prefix() -> String {
 struct FileConfig {
     #[serde(default)]
     name: String,
+    // Listen address/port: honored from the file when present (Go reads them via
+    // viper), else they come from the --address/--port flags or their env vars.
+    #[serde(default)]
+    address: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
     #[serde(default)]
     client_insecure: bool,
     #[serde(default)]
@@ -504,4 +512,68 @@ struct FileConfig {
     user_personal_channel_namespace: String,
     #[serde(default)]
     namespaces: Vec<NamespaceCfg>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn args(argv: &[&str]) -> ServeArgs {
+        let mut v = vec!["centrifugo"];
+        v.extend_from_slice(argv);
+        crate::cli::Cli::try_parse_from(v).unwrap().serve
+    }
+
+    #[test]
+    fn default_address_is_all_interfaces() {
+        // Go-compatible default: bind all interfaces (so a CMD override is reachable).
+        assert_eq!(args(&[]).address, "0.0.0.0");
+    }
+
+    #[test]
+    fn redis_host_port_url_map_to_address() {
+        assert_eq!(
+            effective_redis_address(&args(&["--redis_host", "h", "--redis_port", "7000"])),
+            "h:7000"
+        );
+        // redis_url wins over host/port.
+        assert_eq!(
+            effective_redis_address(&args(&[
+                "--redis_url",
+                "redis://x:1/2",
+                "--redis_host",
+                "h"
+            ])),
+            "redis://x:1/2"
+        );
+        // host alone defaults the port; neither → the single redis_address.
+        assert_eq!(
+            effective_redis_address(&args(&["--redis_host", "h"])),
+            "h:6379"
+        );
+        assert_eq!(effective_redis_address(&args(&[])), "127.0.0.1:6379");
+    }
+
+    #[test]
+    fn config_file_address_port_honored_else_flag() {
+        // File wins when it specifies address/port (Go honors them).
+        let s = Settings::from_file_and_args(r#"{"address":"1.2.3.4","port":9001}"#, &args(&[]))
+            .unwrap();
+        assert_eq!(s.address, "1.2.3.4");
+        assert_eq!(s.port, 9001);
+        // Absent in file → fall back to the flag/default.
+        let s = Settings::from_file_and_args(r#"{}"#, &args(&["--port", "7777"])).unwrap();
+        assert_eq!(s.port, 7777);
+    }
+
+    #[test]
+    fn config_file_redis_host_port_mapped() {
+        let s = Settings::from_file_and_args(
+            r#"{"engine":"redis","redis_host":"cfg","redis_port":"6390"}"#,
+            &args(&[]),
+        )
+        .unwrap();
+        assert_eq!(s.redis_address, "cfg:6390");
+    }
 }

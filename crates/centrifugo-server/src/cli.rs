@@ -82,11 +82,13 @@ pub struct ServeArgs {
     /// Path to a JSON config file (auto-discovers ./config.json when omitted).
     #[arg(short = 'c', long = "config")]
     pub config: Option<String>,
+    // Default to all interfaces like Go centrifugo (its empty default binds all),
+    // so an override of the container CMD without --address is still reachable.
     #[arg(
         short = 'a',
         long = "address",
         env = "CENTRIFUGO_ADDRESS",
-        default_value = "127.0.0.1"
+        default_value = "0.0.0.0"
     )]
     pub address: String,
     #[arg(

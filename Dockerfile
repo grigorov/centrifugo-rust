@@ -55,6 +55,6 @@ EXPOSE 8000 10000
 # No entrypoint (like the official image): the bare root command IS the server, so
 # `docker run IMG centrifugo [flags]` and `docker run IMG centrifugo <subcommand>` work.
 ENTRYPOINT []
-# Bare `docker run IMG` starts the server. Insecure default for local use; compose
-# overrides `command:` for the cluster.
-CMD ["centrifugo", "--client_insecure", "--address", "0.0.0.0"]
+# Bare `docker run IMG` starts the server (binds all interfaces by default, like Go).
+# Insecure default for local use; compose overrides `command:` for the cluster.
+CMD ["centrifugo", "--client_insecure"]
