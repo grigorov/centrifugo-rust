@@ -45,8 +45,56 @@ fn gentoken(args: GentokenArgs) -> anyhow::Result<()> {
     }
     let token = gen_connect_token(&secret, &args.user, args.ttl)
         .map_err(|e| anyhow::anyhow!("generate token: {e}"))?;
+    if args.ttl > 0 {
+        println!(
+            "HMAC SHA-256 JWT for user \"{}\" with expiration TTL {} seconds:",
+            args.user, args.ttl
+        );
+    } else {
+        println!(
+            "HMAC SHA-256 JWT for user \"{}\" (no expiration):",
+            args.user
+        );
+    }
     println!("{token}");
     Ok(())
+}
+
+/// `checktoken`: verify a connection JWT against the HMAC secret and print its
+/// claims (mirrors Go's `checktoken`). Non-zero exit on a missing/invalid token.
+fn checktoken(args: cli::ChecktokenArgs) -> anyhow::Result<()> {
+    let token = args
+        .token
+        .ok_or_else(|| anyhow::anyhow!("usage: centrifugo checktoken [TOKEN]"))?;
+    let secret = if !args.token_hmac_secret_key.is_empty() {
+        args.token_hmac_secret_key
+    } else if let Some(path) = &args.config {
+        let json = std::fs::read_to_string(path)?;
+        let v: serde_json::Value = serde_json::from_str(&json)?;
+        v.get("token_hmac_secret_key")
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        String::new()
+    };
+    if secret.is_empty() {
+        anyhow::bail!("no HMAC secret: pass --token_hmac_secret_key or -c <config>");
+    }
+    let verifier = TokenVerifier::new(&secret, None, None)
+        .map_err(|e| anyhow::anyhow!("build verifier: {e}"))?;
+    match verifier.verify_connect_token(&token) {
+        Ok(ct) => {
+            let exp = if ct.expire_at > 0 {
+                ct.expire_at.to_string()
+            } else {
+                "none".to_string()
+            };
+            println!("valid token for user \"{}\" (expire_at: {exp})", ct.user);
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("invalid token: {e:?}"),
+    }
 }
 
 /// `genconfig`: write a fresh config with random secrets.
@@ -54,9 +102,14 @@ fn genconfig(path: &str) -> anyhow::Result<()> {
     if std::path::Path::new(path).exists() {
         anyhow::bail!("{path} already exists");
     }
+    // Mirror Go centrifugo's genconfig starter key set.
     let cfg = serde_json::json!({
+        "v3_use_offset": false,
         "token_hmac_secret_key": uuid::Uuid::new_v4().to_string(),
+        "admin_password": uuid::Uuid::new_v4().to_string(),
+        "admin_secret": uuid::Uuid::new_v4().to_string(),
         "api_key": uuid::Uuid::new_v4().to_string(),
+        "allowed_origins": [],
     });
     std::fs::write(path, serde_json::to_string_pretty(&cfg)?)?;
     println!("config written to {path}");
@@ -192,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Gentoken(args)) => gentoken(args),
         Some(Command::Genconfig(args)) => genconfig(&args.config),
         Some(Command::Checkconfig(args)) => checkconfig(&args.config),
+        Some(Command::Checktoken(args)) => checktoken(args),
     }
 }
 

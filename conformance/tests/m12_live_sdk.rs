@@ -36,7 +36,8 @@ async fn centrifuge_go_sdk_authenticates_with_jwt() {
         "sdk-user",
     ]);
     assert_eq!(code, 0, "gentoken failed");
-    let token = token.trim();
+    // gentoken prints a descriptive header line then the token on the last line.
+    let token = token.lines().last().unwrap_or("").trim();
 
     let Some((code, output)) = run_go_client_token(&s.ws_url(), token) else {
         return; // go not installed

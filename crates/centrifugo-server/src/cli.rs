@@ -33,6 +33,8 @@ pub enum Command {
     Genconfig(ConfigPathArgs),
     /// Validate a config file and exit non-zero on error.
     Checkconfig(ConfigPathArgs),
+    /// Check (verify + print) a connection JWT.
+    Checktoken(ChecktokenArgs),
     /// Print version and exit.
     Version,
 }
@@ -45,12 +47,24 @@ pub struct GentokenArgs {
     /// Subject (user id) for the token.
     #[arg(short = 'u', long = "user", default_value = "")]
     pub user: String,
-    /// Token TTL in seconds (0 = no expiry).
-    #[arg(long = "ttl", default_value_t = 0)]
+    /// Token TTL in seconds (default 7 days, matching Go; 0 = no expiry).
+    #[arg(short = 't', long = "ttl", default_value_t = 604800)]
     pub ttl: u64,
     /// HMAC secret (overrides the config file).
     #[arg(long = "token_hmac_secret_key", default_value = "")]
     pub token_hmac_secret_key: String,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ChecktokenArgs {
+    /// Config file to read `token_hmac_secret_key` from.
+    #[arg(short = 'c', long = "config")]
+    pub config: Option<String>,
+    /// HMAC secret (overrides the config file).
+    #[arg(long = "token_hmac_secret_key", default_value = "")]
+    pub token_hmac_secret_key: String,
+    /// The connection JWT to check.
+    pub token: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]

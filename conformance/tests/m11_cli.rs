@@ -13,7 +13,8 @@ async fn gentoken_produces_valid_connection_token() {
         "alice",
     ]);
     assert_eq!(code, 0, "gentoken exit code");
-    let token = out.trim().to_string();
+    // gentoken prints a descriptive header line then the token on the last line.
+    let token = out.lines().last().unwrap_or("").trim().to_string();
     assert!(!token.is_empty(), "empty token");
 
     let s = Server::start_with_config(r#"{"token_hmac_secret_key":"secret"}"#).await;
