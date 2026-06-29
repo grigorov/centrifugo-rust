@@ -577,10 +577,12 @@ impl Client {
         }
 
         let reply = ok_reply(self.proto, cmd.id, &result);
-        // Join is published after the subscribe reply; the joiner is now a
-        // subscriber (matches centrifuge ordering).
+        // Defer the self-Join until after the subscribe reply frame is flushed
+        // (see flush_pending_joins). Go flushes the reply first, then publishes
+        // Join on a detached goroutine (client.go:1100-1104), so the subscriber
+        // always sees REPLY then JOIN — never JOIN before its own subscribe reply.
         if join_leave {
-            self.node.publish_join(&req.channel, sub_info).await;
+            self.pending_joins.push((req.channel.clone(), sub_info));
         }
         CommandOutcome::replies(vec![reply])
     }

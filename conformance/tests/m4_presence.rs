@@ -49,6 +49,33 @@ async fn join_and_leave_pushes() {
 }
 
 #[tokio::test]
+async fn self_join_follows_subscribe_reply() {
+    // H2 regression: on a client SUBSCRIBE to a join_leave channel, the subscribe
+    // REPLY must be flushed before the self-JOIN push (Go flushes the reply first,
+    // then publishes Join on a detached goroutine). Pre-fix Rust emitted JOIN first.
+    let s = Server::start_with(&["--client_insecure", "--presence", "--join_leave"]).await;
+
+    let mut a = WsJsonClient::connect(&s.ws_url()).await;
+    let a_id = a.connect_command().await;
+
+    // Send SUBSCRIBE raw so we can inspect frame order ourselves.
+    a.send_raw(r#"{"id":2,"method":1,"params":{"channel":"room"}}"#)
+        .await;
+
+    // First frame must be the subscribe reply (carries id:2, no push `type`).
+    let first = a.next_json().await;
+    assert_eq!(first["id"], 2, "first frame must be the subscribe reply: {first}");
+    assert!(
+        first["result"].get("type").is_none(),
+        "first frame must not be a push: {first}"
+    );
+
+    // The self-Join arrives only after the reply.
+    let join = a.next_join_leave_for(1, &a_id).await;
+    assert_eq!(join["result"]["channel"], "room");
+}
+
+#[tokio::test]
 async fn presence_disabled_returns_not_available() {
     let s = Server::start_with(&["--client_insecure"]).await;
     let mut a = WsJsonClient::connect(&s.ws_url()).await;
