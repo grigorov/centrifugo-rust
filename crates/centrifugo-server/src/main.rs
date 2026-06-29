@@ -93,6 +93,62 @@ fn hostname() -> String {
         .unwrap_or_else(|| "centrifugo".to_string())
 }
 
+/// Map Go centrifugo's `log_level` (debug|info|warn|error|fatal|none) to a tracing
+/// `EnvFilter` directive. Unknown levels fall back to `info`.
+fn map_log_level(level: &str) -> String {
+    match level.to_ascii_lowercase().as_str() {
+        "debug" => "debug",
+        "warn" | "warning" => "warn",
+        "error" => "error",
+        "fatal" => "error",
+        "none" | "off" => "off",
+        _ => "info",
+    }
+    .to_string()
+}
+
+/// Warn for official flags that are accepted (so a Go command line starts) but have
+/// no effect in this build. `--prometheus`/`--health` are omitted — `/metrics` and
+/// `/health` are always served.
+fn warn_unsupported_flags(a: &cli::ServeArgs) {
+    let mut ignored: Vec<&str> = Vec::new();
+    let mut bool_flag = |on: bool, name: &'static str| {
+        if on {
+            ignored.push(name);
+        }
+    };
+    bool_flag(a.tls, "--tls");
+    bool_flag(a.tls_external, "--tls_external");
+    bool_flag(a.admin_external, "--admin_external");
+    bool_flag(a.redis_tls, "--redis_tls");
+    bool_flag(a.redis_tls_skip_verify, "--redis_tls_skip_verify");
+    bool_flag(a.grpc_api_tls, "--grpc_api_tls");
+    bool_flag(a.grpc_api_tls_disable, "--grpc_api_tls_disable");
+    bool_flag(a.debug, "--debug");
+    for (val, name) in [
+        (&a.tls_cert, "--tls_cert"),
+        (&a.tls_key, "--tls_key"),
+        (&a.internal_address, "--internal_address"),
+        (&a.internal_port, "--internal_port"),
+        (&a.broker, "--broker"),
+        (&a.nats_url, "--nats_url"),
+        (&a.redis_sentinel_password, "--redis_sentinel_password"),
+        (&a.grpc_api_tls_cert, "--grpc_api_tls_cert"),
+        (&a.grpc_api_tls_key, "--grpc_api_tls_key"),
+        (&a.log_file, "--log_file"),
+    ] {
+        if !val.is_empty() {
+            ignored.push(name);
+        }
+    }
+    if !ignored.is_empty() {
+        tracing::warn!(
+            "ignoring unsupported flag(s) (no effect in this build): {}",
+            ignored.join(", ")
+        );
+    }
+}
+
 /// Fetch a JWKS document body from `url`.
 async fn fetch_jwks(url: &str) -> anyhow::Result<String> {
     Ok(reqwest::Client::new()
@@ -141,11 +197,18 @@ async fn main() -> anyhow::Result<()> {
 
 /// Run the messaging server (the root command, and the `serve` alias).
 async fn run_server(args: cli::ServeArgs) -> anyhow::Result<()> {
+    // RUST_LOG (dev override) wins; otherwise map Go's --log_level / CENTRIFUGO_LOG_LEVEL.
+    let log_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| map_log_level(&args.log_level));
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::new(log_filter))
         .init();
+    // Accepted-but-unimplemented official flags warn here instead of aborting startup.
+    warn_unsupported_flags(&args);
+    if !args.pid_file.is_empty() {
+        if let Err(e) = std::fs::write(&args.pid_file, std::process::id().to_string()) {
+            tracing::warn!("could not write pid_file {}: {e}", args.pid_file);
+        }
+    }
     // Like Go centrifugo, fall back to ./config.json in the working dir when no
     // -c is given (so a mounted /centrifugo/config.json is picked up by a bare run).
     let config_path = args.config.clone().or_else(|| {

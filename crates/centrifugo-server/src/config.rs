@@ -11,6 +11,29 @@ use serde::Deserialize;
 
 use crate::cli::ServeArgs;
 
+/// Resolve the effective Redis address from the Go-compatible aliases: `--redis_url`
+/// wins, else `--redis_host`/`--redis_port` (defaulting host `127.0.0.1`, port `6379`)
+/// are combined, else the single `--redis_address`.
+pub(crate) fn effective_redis_address(a: &ServeArgs) -> String {
+    if !a.redis_url.is_empty() {
+        a.redis_url.clone()
+    } else if !a.redis_host.is_empty() || !a.redis_port.is_empty() {
+        let host = if a.redis_host.is_empty() {
+            "127.0.0.1"
+        } else {
+            &a.redis_host
+        };
+        let port = if a.redis_port.is_empty() {
+            "6379"
+        } else {
+            &a.redis_port
+        };
+        format!("{host}:{port}")
+    } else {
+        a.redis_address.clone()
+    }
+}
+
 pub struct Settings {
     pub address: String,
     pub port: u16,
@@ -91,6 +114,17 @@ impl Settings {
         if !self.api_insecure && env("API_INSECURE").as_deref() == Some("true") {
             self.api_insecure = true;
         }
+        // Boolean toggles official exposes via env (clap's bool+env is awkward, so
+        // they are handled here rather than as clap `env` attrs).
+        if !self.admin && env("ADMIN").as_deref() == Some("true") {
+            self.admin = true;
+        }
+        if !self.admin_insecure && env("ADMIN_INSECURE").as_deref() == Some("true") {
+            self.admin_insecure = true;
+        }
+        if !self.grpc_api && env("GRPC_API").as_deref() == Some("true") {
+            self.grpc_api = true;
+        }
         // Engine/redis address: overlay only when still at the built-in default.
         if self.engine == "memory" {
             if let Some(v) = env("ENGINE") {
@@ -132,7 +166,7 @@ impl Settings {
             grpc_api_port: a.grpc_api_port,
             grpc_api_key: a.grpc_api_key.clone(),
             engine: a.engine.clone(),
-            redis_address: a.redis_address.clone(),
+            redis_address: effective_redis_address(a),
             redis_master_name: a.redis_master_name.clone(),
             redis_sentinels: a.redis_sentinels.clone(),
             redis_password: a.redis_password.clone(),
