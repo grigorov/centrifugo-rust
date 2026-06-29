@@ -4,10 +4,19 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "centrifugo", disable_version_flag = true)]
+#[command(
+    name = "centrifugo",
+    disable_version_flag = true,
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
+    /// Server flags — the bare root command runs the server (matches Go centrifugo,
+    /// whose root command is the server). All have defaults, so they don't
+    /// interfere with the maintenance subcommands below.
+    #[command(flatten)]
+    pub serve: ServeArgs,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -15,7 +24,8 @@ pub struct Cli {
 // irrelevant and boxing fights the clap derive.
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
-    /// Run the server.
+    /// Run the server (alias; the bare root command does the same).
+    #[command(hide = true)]
     Serve(ServeArgs),
     /// Generate a connection JWT (HS256) for a user.
     Gentoken(GentokenArgs),
