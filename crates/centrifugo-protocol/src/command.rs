@@ -42,6 +42,16 @@ impl Reply {
         }
     }
 
+    /// A bare reply with neither result nor error (`{"id":N}` in JSON). Go's
+    /// handlePing writes `&protocol.Reply{}` — no result object.
+    pub fn bare(id: u32) -> Self {
+        Reply {
+            id,
+            error: None,
+            result: None,
+        }
+    }
+
     /// An error reply.
     pub fn err(id: u32, error: Error) -> Self {
         Reply {

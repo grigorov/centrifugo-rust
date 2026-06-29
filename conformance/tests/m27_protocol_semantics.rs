@@ -84,6 +84,41 @@ async fn rpc_without_proxy_not_available() {
     );
 }
 
+// M4: a PING reply is a bare `{"id":N}` — no `result` object.
+#[tokio::test]
+async fn ping_reply_has_no_result() {
+    let s = Server::start_with(&["--client_insecure"]).await;
+    let mut c = WsJsonClient::connect(&s.ws_url()).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":7}"#).await;
+    let reply = c.next_json().await;
+    assert_eq!(reply["id"], 2);
+    assert!(
+        reply.get("result").is_none(),
+        "PING reply must omit result: {reply}"
+    );
+    assert!(reply.get("error").is_none());
+}
+
+// Golden parity: the PING reply matches the Go oracle byte-for-byte (JSON).
+#[tokio::test]
+async fn ping_reply_matches_go() {
+    let Some(go) = Oracle::start_with_config(r#"{"client_insecure":true}"#).await else {
+        return;
+    };
+    let rust = Server::start_with(&["--client_insecure"]).await;
+    let go_reply = ping_reply(&go.ws_url()).await;
+    let rust_reply = ping_reply(&rust.ws_url()).await;
+    assert_eq!(go_reply, rust_reply, "PING reply differs from Go");
+}
+
+async fn ping_reply(ws_url: &str) -> serde_json::Value {
+    let mut c = WsJsonClient::connect(ws_url).await;
+    c.connect_command().await;
+    c.send_raw(r#"{"id":2,"method":7}"#).await;
+    c.next_json().await
+}
+
 // Golden parity: the unknown-method 104 reply matches the Go oracle exactly.
 #[tokio::test]
 async fn unknown_method_matches_go() {

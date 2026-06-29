@@ -9,10 +9,10 @@ use std::sync::Arc;
 use centrifugo_auth::VerifyError;
 use centrifugo_protocol::codec::{self, WireType};
 use centrifugo_protocol::messages::{
-    ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, PingResult,
-    PresenceRequest, PresenceResult, PresenceStatsRequest, PresenceStatsResult, PublishRequest,
-    PublishResult, RefreshRequest, RefreshResult, RpcRequest, RpcResult, SubRefreshRequest,
-    SubRefreshResult, SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
+    ClientInfo, ConnectRequest, ConnectResult, HistoryRequest, HistoryResult, PresenceRequest,
+    PresenceResult, PresenceStatsRequest, PresenceStatsResult, PublishRequest, PublishResult,
+    RefreshRequest, RefreshResult, RpcRequest, RpcResult, SubRefreshRequest, SubRefreshResult,
+    SubscribeRequest, SubscribeResult, UnsubscribeRequest, UnsubscribeResult,
 };
 use centrifugo_protocol::{
     Command, Disconnect, Error, MethodType, ProtocolType, Push, PushType, Raw, Reply,
@@ -205,9 +205,9 @@ impl Client {
             MethodType::Subscribe => self.on_subscribe(cmd).await,
             MethodType::Publish => self.on_publish(cmd).await,
             MethodType::Unsubscribe => self.on_unsubscribe(cmd).await,
-            MethodType::Ping => {
-                CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &PingResult {})])
-            }
+            // Go handlePing writes a bare Reply (no result): JSON `{"id":N}`, not
+            // `{"id":N,"result":{}}`. Protobuf is unchanged (empty result omitted).
+            MethodType::Ping => CommandOutcome::replies(vec![Reply::bare(cmd.id)]),
             MethodType::Refresh => self.on_refresh(cmd).await,
             // SEND is fire-and-forget: no reply.
             MethodType::Send => CommandOutcome::replies(vec![]),
