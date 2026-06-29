@@ -1,13 +1,43 @@
 //! M10 (JWKS): the server fetches a JWKS endpoint at startup and verifies a
-//! connection token by its `kid`. A mock HTTP server serves an `oct` JWKS (fast;
-//! the kid-selection path is identical for RSA/ECDSA keys).
+//! connection token by its `kid`. Centrifugo's JWKS path is RSA-only, so the
+//! mock endpoint serves an RSA signature key (matching Go, which rejects
+//! non-RSA / non-`sig` JWKs).
 
-use base64::Engine;
 use conformance::{Server, WsJsonClient};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
 
-const SECRET: &[u8] = b"jwks-shared-secret";
+/// 2048-bit RSA test keypair: the private key (PKCS#8 PEM) signs tokens; the
+/// JWKS publishes its public modulus (`RSA_N`, exponent AQAB / 65537).
+const RSA_PRIV_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC/nEiIHJm+3VBp
+QJu0zv3y7FZ+2gzqo6DVW9njmTpYDVFPQHH7Wa0baiZDlZCYceeFe1KNQ1FkJiBX
+GNgb3fFMXUkcqnFRqWlFplYKUxePXZOdi/GlBbqC99dIsnfeOOPYTy0+axCA5s2N
+SOSROw1kNsifElPz154txfqADf+ByHpNW4ggOjUXQkfd3J1NW4B0xDOHExZ6gYcx
+hVaBucJR0xNzTTDdWQGqnPdFPwWWp6YK77mxwV7pIWUCIukVoLmv2rWJ2KeihMze
+HJ0zWJbNJhABfEdy8Rbq/9HUhRq+t1q7O6bBSFrrcZg6dHARiYc9ckQqDWuRYI0r
+V/HfTiEJAgMBAAECggEAAfb9EbbWXXWyqVBvtrUzkP1BeIDgpnrM6RP6Kkcg1dr1
+tGkp8HMa1YsOlaPH24WGfRDjl7FJWT+TvKtNH846sLoy20CeeeeE13Se6v5Vx/y+
+CRZqNDNrwx198QZFRaUO2Nt1/UiW688O3xXwlxJaxXls1pNXHLF4/+/o5ppOJMAb
+X6v7kmpbEZU7JcAv0aZx/kpVVoCZV79WWfgBCicBv6mml5NawoPBG/9d8PvAtAst
+8GYwFP2JlQorJa6lk1uKLhu2LxsNSDtIw3+jrLYssEpkJFRxu2glhdpMtJE/X0/R
+AXssACqCWnqgqJuKX9Co3Iq2vbl1qr/6SiOHv/ARAQKBgQD5hoodKISvWUL1ZRjO
+k8R7ClSrFVNQDxbPzkRvQodLdxAFyYjn4z+EDwfmSnHnhLdZbAZhbk+Vyoigsif7
+9RD+8p+fVW8C5TFeg6q/8Ij9LjUMBR5lhB7RhHClfa7nLyM0AJxeUuQJ+1Xm3k9b
+uvLmWJ4HWbQUiZXtJ6hs+anVAQKBgQDElQvHq2zYcEurbYEu9uWBpSqLOJqWfUpb
+KQZoM5bhElwt3vdOydkt240Dg21Omlv1giGDA1Wuzi4vcQTzlRqHawSYsrL1r4oK
+VcISTma6SkHPSNX4AgJ+/62nmrWT9pa01sNTnclOE2s6V2l5awW4EFni/juSqaUH
+y3OaFuGkCQKBgQCjDzt0QIUsvW0XRcCHRmMwcJjR0DbIa4Phuo5YEqatNxoeXgv8
+VTGtj9D+ugljXQQgCIrG4rpZTagpMyMT8JrxsAWFruPDhZjUhcBwe7RZlveNak7p
+0gP9sMmYK+C/LLuZgQiuTwa8SyVgoEhFzo5q3uAuN32JqjtyZecXh7NnAQKBgFrd
+ng1UQsKk3YVG36CqxRkxFEI4DtSi4zzR8ME3n3U3vF4DowLLMFUPF9ZY6KydkwYf
+eYgKgY+EhDqvnh9Ne26+2+gNKcWAt2jhjQxTKw7PBi5fN3Ak1ayIWGeRjn7vS2gZ
+oT3EQGmTdkwIXZufCYy0GihfZX/8ZGj+9Ndz3iapAoGAVMhJJZ9NFnQg8FnTWVMz
+32lrQ7ySHBZkWb4hLh+x3wLNNy32hHlxgSHwcD/euZGyqsPh7gHbF8JYMkiwAhVx
+ueHGIivqCFfLTIiPy+cHUusq4lwDbpNg+ELrDuqQXAOiUyjlBUscR0X+VdSAHuSU
+WGE/+8RJi42fdcJbdeguCLA=
+-----END PRIVATE KEY-----";
+const RSA_N: &str = "v5xIiByZvt1QaUCbtM798uxWftoM6qOg1VvZ45k6WA1RT0Bx-1mtG2omQ5WQmHHnhXtSjUNRZCYgVxjYG93xTF1JHKpxUalpRaZWClMXj12TnYvxpQW6gvfXSLJ33jjj2E8tPmsQgObNjUjkkTsNZDbInxJT89eeLcX6gA3_gch6TVuIIDo1F0JH3dydTVuAdMQzhxMWeoGHMYVWgbnCUdMTc00w3VkBqpz3RT8FlqemCu-5scFe6SFlAiLpFaC5r9q1idinooTM3hydM1iWzSYQAXxHcvEW6v_R1IUavrdauzumwUha63GYOnRwEYmHPXJEKg1rkWCNK1fx304hCQ";
 
 /// Spawn a minimal HTTP server that returns `body` (as JSON) for any request.
 /// Returns the JWKS URL. The task is detached; the test process reaps it.
@@ -38,17 +68,18 @@ async fn spawn_jwks(body: String) -> String {
 }
 
 fn jwks_doc() -> String {
-    let k = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(SECRET);
-    format!(r#"{{"keys":[{{"kty":"oct","kid":"key1","k":"{k}","alg":"HS256"}}]}}"#)
+    format!(
+        r#"{{"keys":[{{"kty":"RSA","use":"sig","alg":"RS256","kid":"key1","n":"{RSA_N}","e":"AQAB"}}]}}"#
+    )
 }
 
 fn kid_token(kid: &str) -> String {
-    let mut header = Header::new(Algorithm::HS256);
+    let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(kid.into());
     encode(
         &header,
         &json!({"sub": "jwks-user"}),
-        &EncodingKey::from_secret(SECRET),
+        &EncodingKey::from_rsa_pem(RSA_PRIV_PEM.as_bytes()).unwrap(),
     )
     .unwrap()
 }
