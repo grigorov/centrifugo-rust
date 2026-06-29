@@ -69,11 +69,41 @@ async fn handle_socket(socket: WebSocket, node: Arc<Node>, proto: ProtocolType) 
             tokio::select! {
                 maybe = rx.recv() => match maybe {
                     Some(Out::Frame(bytes)) => {
+                        // Coalesce up to 4 queued frames into one WS frame (Go's writer
+                        // batches up to defaultMaxMessagesInFrame=4). JSON frames are
+                        // NDJSON (each ends with '\n') and protobuf frames are uvarint
+                        // length-prefixed, so concatenation is valid for both — the SDK
+                        // splits/streams them back into individual messages.
+                        let mut buf = bytes;
+                        let mut pending_close = None;
+                        let mut n = 1;
+                        while n < 4 {
+                            match rx.try_recv() {
+                                Ok(Out::Frame(more)) => {
+                                    buf.extend_from_slice(&more);
+                                    n += 1;
+                                }
+                                Ok(Out::Close(d)) => {
+                                    pending_close = Some(d);
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         let msg = match proto {
-                            ProtocolType::Json => Message::Text(String::from_utf8_lossy(&bytes).into_owned()),
-                            ProtocolType::Protobuf => Message::Binary(bytes),
+                            ProtocolType::Json => Message::Text(String::from_utf8_lossy(&buf).into_owned()),
+                            ProtocolType::Protobuf => Message::Binary(buf),
                         };
                         if sink.send(msg).await.is_err() {
+                            break;
+                        }
+                        if let Some(disconnect) = pending_close {
+                            let _ = sink
+                                .send(Message::Close(Some(CloseFrame {
+                                    code: disconnect.code as u16,
+                                    reason: disconnect.close_text().into(),
+                                })))
+                                .await;
                             break;
                         }
                     }

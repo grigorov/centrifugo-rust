@@ -498,15 +498,22 @@ pub fn key_shape(v: &serde_json::Value) -> serde_json::Value {
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// A minimal JSON WebSocket client speaking the v0.3.4 protocol.
+/// A minimal JSON WebSocket client speaking the v0.3.4 protocol. Buffers the
+/// NDJSON lines of a frame, so a coalesced frame (the server may pack up to 4
+/// messages per WS frame) is split back into one message per `next_json`, like a
+/// real SDK.
 pub struct WsJsonClient {
     ws: WsStream,
+    pending: std::collections::VecDeque<serde_json::Value>,
 }
 
 impl WsJsonClient {
     pub async fn connect(url: &str) -> Self {
         let (ws, _resp) = connect_async(url).await.expect("ws connect");
-        WsJsonClient { ws }
+        WsJsonClient {
+            ws,
+            pending: std::collections::VecDeque::new(),
+        }
     }
 
     pub async fn send_raw(&mut self, json: &str) {
@@ -641,16 +648,35 @@ impl WsJsonClient {
         panic!("did not observe push type {push_type} for client {client_id}");
     }
 
-    /// Read the next text frame's first JSON line, ignoring ping/pong/binary.
+    /// Return the next JSON message, draining any buffered lines from a previously
+    /// read (possibly coalesced) frame first. Ignores ping/pong/binary.
     pub async fn next_json(&mut self) -> serde_json::Value {
         loop {
+            if let Some(v) = self.pending.pop_front() {
+                return v;
+            }
             match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
                 Ok(Some(Ok(Message::Text(t)))) => {
-                    let line = t.lines().next().unwrap_or("{}");
-                    return serde_json::from_str(line).expect("valid json frame");
+                    for line in t.lines().filter(|l| !l.is_empty()) {
+                        self.pending
+                            .push_back(serde_json::from_str(line).expect("valid json frame"));
+                    }
                 }
                 Ok(Some(Ok(_))) => continue,
                 other => panic!("ws closed/timeout waiting for json: {other:?}"),
+            }
+        }
+    }
+
+    /// Read the next raw text WS frame verbatim (no NDJSON splitting), ignoring
+    /// ping/pong/binary. Used to observe frame coalescing. Do not mix with
+    /// `next_json` on the same client (this bypasses the line buffer).
+    pub async fn next_text_frame(&mut self) -> String {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
+                Ok(Some(Ok(Message::Text(t)))) => return t,
+                Ok(Some(Ok(_))) => continue,
+                other => panic!("ws closed/timeout waiting for frame: {other:?}"),
             }
         }
     }
@@ -689,12 +715,16 @@ use prost::Message as _;
 /// URL carrying `?format=protobuf`.
 pub struct PbWsClient {
     ws: WsStream,
+    pending: std::collections::VecDeque<Reply>,
 }
 
 impl PbWsClient {
     pub async fn connect(url: &str) -> Self {
         let (ws, _resp) = connect_async(url).await.expect("pb ws connect");
-        PbWsClient { ws }
+        PbWsClient {
+            ws,
+            pending: std::collections::VecDeque::new(),
+        }
     }
 
     async fn send(&mut self, cmd: ProtoCommand) {
@@ -704,15 +734,15 @@ impl PbWsClient {
 
     async fn next_reply(&mut self) -> Reply {
         loop {
+            if let Some(r) = self.pending.pop_front() {
+                return r;
+            }
             match tokio::time::timeout(Duration::from_secs(30), self.ws.next()).await {
                 Ok(Some(Ok(Message::Binary(b)))) => {
-                    if let Some(r) = decode_replies(ProtocolType::Protobuf, &b)
-                        .unwrap()
-                        .into_iter()
-                        .next()
-                    {
-                        return r;
-                    }
+                    // A frame may coalesce several uvarint-prefixed replies; buffer
+                    // them all so each next_reply returns one (like a real SDK).
+                    self.pending
+                        .extend(decode_replies(ProtocolType::Protobuf, &b).unwrap());
                 }
                 Ok(Some(Ok(_))) => continue,
                 other => panic!("pb ws closed/timeout: {other:?}"),
