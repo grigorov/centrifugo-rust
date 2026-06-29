@@ -391,6 +391,28 @@ pub fn run_go_client_token(ws_url: &str, token: &str) -> Option<(i32, String)> {
         p.push("go-client");
         p
     };
+    // Buildability probe: if the toolchain can't fetch/compile the client (e.g. a
+    // runner with no access to the Go module proxy), skip rather than fail — this
+    // is an SDK *compatibility* probe, not a build test, and a fetch error must not
+    // be reported as the SDK misbehaving. Writing to /dev/null leaves no artifact
+    // and is safe under concurrent test invocations; it also warms the module cache
+    // so the subsequent `go run` is fast.
+    let buildable = Command::new("go")
+        .args(["build", "-o", "/dev/null", "."])
+        .env("GOFLAGS", "-mod=mod")
+        .current_dir(&dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !buildable {
+        eprintln!(
+            "centrifuge-go client could not be built (toolchain/module proxy unavailable); \
+             skipping live SDK test"
+        );
+        return None;
+    }
     let mut args = vec!["run".to_string(), ".".to_string(), ws_url.to_string()];
     if !token.is_empty() {
         args.push(token.to_string());

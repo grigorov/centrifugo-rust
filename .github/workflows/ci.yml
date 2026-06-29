@@ -5,12 +5,45 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Go is needed for the live centrifuge-go SDK probe (m12) and the differential
+      # Go oracle; its module cache is keyed on the go-client checksums.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: conformance/go-client/go.sum
+
       - name: fmt
         run: cargo fmt --all --check
+
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # --- Conformance dependencies (see README). Each is best-effort: the suite
+      # skips the tests that need a dependency when it is absent, so a provisioning
+      # hiccup degrades to reduced coverage rather than a red build. ---
+
+      # `redis-server` binary for the multi-node Redis tests (the harness spawns its
+      # own throwaway instance on a random port; we only need the binary present).
+      - name: install redis-server
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y redis-server \
+            || echo "redis-server unavailable; Redis tests will skip"
+
+      # Build the real Centrifugo v2.8.6 as a differential oracle (clones the tag +
+      # `go build`); golden/interop tests skip if this is unavailable.
+      - name: build go oracle
+        run: bash conformance/go-oracle/build.sh || echo "go oracle build failed; differential tests will skip"
+
+      # Warm the go-client module cache so the live-SDK probe (m12) is fast/reliable;
+      # m12 skips on its own if the client cannot be built.
+      - name: prefetch go-client modules
+        run: (cd conformance/go-client && go mod download) || echo "go-client module download failed; m12 will skip"
+
       - name: test
         run: cargo test --workspace
