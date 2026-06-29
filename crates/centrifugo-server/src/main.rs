@@ -18,10 +18,10 @@ use centrifugo_core::{
     make_route, Engine, Hub, MemoryEngine, Node, NodeRegistry, DEFAULT_USE_SEQ_GEN,
 };
 use centrifugo_redis::RedisEngine;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use crate::cli::{Cli, Command, GentokenArgs};
-use crate::config::{check_config, Settings};
+use crate::config::{check_config, ExplicitArgs, Settings};
 
 const VERSION: &str = "2.8.6";
 
@@ -232,12 +232,23 @@ fn spawn_jwks_refresh(verifier: Arc<TokenVerifier>, url: String) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Parse into ArgMatches first so we can ask clap which serve args were set
+    // explicitly (CLI or CENTRIFUGO_* env) — they must beat a config file
+    // (viper precedence: flag > env > file > default).
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     match cli.command {
         // No subcommand → run the server (Go centrifugo's root command is the
-        // server). `serve` is kept as a hidden alias for the same.
-        None => run_server(cli.serve).await,
-        Some(Command::Serve(args)) => run_server(args).await,
+        // server). `serve` is kept as a hidden alias for the same. Compute the
+        // explicit-args set from whichever matches carry the serve args.
+        None => run_server(cli.serve, config::explicit_serve_args(&matches)).await,
+        Some(Command::Serve(args)) => {
+            let explicit = matches
+                .subcommand_matches("serve")
+                .map(config::explicit_serve_args)
+                .unwrap_or_default();
+            run_server(args, explicit).await
+        }
         Some(Command::Version) => {
             println!("Centrifugo v{VERSION}");
             Ok(())
@@ -250,7 +261,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Run the messaging server (the root command, and the `serve` alias).
-async fn run_server(args: cli::ServeArgs) -> anyhow::Result<()> {
+/// `explicit` names the serve args set on the CLI/env so they beat a config file.
+async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Result<()> {
     // RUST_LOG (dev override) wins; otherwise map Go's --log_level / CENTRIFUGO_LOG_LEVEL.
     let log_filter = std::env::var("RUST_LOG").unwrap_or_else(|_| map_log_level(&args.log_level));
     tracing_subscriber::fmt()
@@ -270,7 +282,9 @@ async fn run_server(args: cli::ServeArgs) -> anyhow::Result<()> {
         std::path::Path::new(p).exists().then(|| p.to_string())
     });
     let mut settings = match &config_path {
-        Some(path) => Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args)?,
+        Some(path) => {
+            Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args, &explicit)?
+        }
         None => Settings::from_args(&args),
     };
     if args.config.is_none() {

@@ -3,13 +3,73 @@
 //! them); flags cover the single-namespace case. Full layered config (env/TOML/
 //! YAML, flag>file>env precedence) is M11; here `-c` is authoritative when given.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
 use centrifugo_core::{ChannelOptions, Namespaces};
 use serde::Deserialize;
 
 use crate::cli::ServeArgs;
+
+/// Serve-arg ids (clap long names) that were set explicitly on the CLI or via a
+/// `CENTRIFUGO_*` env var. These take precedence over a config file, matching
+/// Go/viper's `flag > env > file > default` precedence.
+pub type ExplicitArgs = HashSet<String>;
+
+/// Serve-arg ids that map 1:1 to a config-file key and so participate in the
+/// flag/env-vs-file precedence. Channel options and bools are sourced from the
+/// file (bools also get an env "turn-on" overlay in [`Settings::apply_env`]).
+const PRECEDENCE_IDS: &[&str] = &[
+    "address",
+    "port",
+    "name",
+    "user_personal_channel_namespace",
+    "token_hmac_secret_key",
+    "token_rsa_public_key",
+    "token_ecdsa_public_key",
+    "token_jwks_public_endpoint",
+    "client_presence_ping_interval",
+    "client_presence_expire_interval",
+    "api_key",
+    "grpc_api_port",
+    "grpc_api_key",
+    "proxy_connect_endpoint",
+    "proxy_refresh_endpoint",
+    "proxy_subscribe_endpoint",
+    "proxy_publish_endpoint",
+    "proxy_rpc_endpoint",
+    "engine",
+    "redis_address",
+    "redis_host",
+    "redis_port",
+    "redis_url",
+    "redis_master_name",
+    "redis_sentinels",
+    "redis_password",
+    "redis_db",
+    "redis_prefix",
+    "redis_history_meta_ttl",
+    "admin_password",
+    "admin_secret",
+    "admin_web_path",
+];
+
+/// Build the set of serve args clap resolved from the CLI or a `CENTRIFUGO_*`
+/// env var (not a default). Only valid for the root/server command, where the
+/// flattened `ServeArgs` live in the top-level matches.
+pub fn explicit_serve_args(m: &clap::ArgMatches) -> ExplicitArgs {
+    use clap::parser::ValueSource;
+    PRECEDENCE_IDS
+        .iter()
+        .filter(|id| {
+            matches!(
+                m.value_source(id),
+                Some(ValueSource::CommandLine) | Some(ValueSource::EnvVariable)
+            )
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
 
 /// Resolve the effective Redis address from the Go-compatible aliases: `--redis_url`
 /// wins, else `--redis_host`/`--redis_port` (defaulting host `127.0.0.1`, port `6379`)
@@ -275,54 +335,147 @@ impl Settings {
         }
     }
 
-    /// Build settings from a JSON config file (authoritative for everything but
-    /// the listen address/port, which come from flags).
-    pub fn from_file_and_args(json: &str, a: &ServeArgs) -> anyhow::Result<Self> {
+    /// Build settings from a JSON config file. Per-key precedence is Go/viper's
+    /// `flag > env > file > default`: a serve arg named in `explicit` (set on the
+    /// CLI or via `CENTRIFUGO_*`) wins over the file; otherwise the file value (or
+    /// its own default) applies. Channel options + bools come from the file (bools
+    /// also get an env turn-on overlay in [`apply_env`]).
+    pub fn from_file_and_args(
+        json: &str,
+        a: &ServeArgs,
+        explicit: &ExplicitArgs,
+    ) -> anyhow::Result<Self> {
         let fc: FileConfig = serde_json::from_str(json)?;
         warn_inert_config_keys(json);
-        let redis_address = effective_redis_address_file(&fc, a);
+        // String field: the explicit flag/env arg wins, else the file value.
+        let s = |id: &str, arg: &str, file: String| -> String {
+            if explicit.contains(id) {
+                arg.to_string()
+            } else {
+                file
+            }
+        };
+        // Redis target: if any redis address arg was set explicitly, the arg
+        // combination wins; otherwise resolve from the file (falling back to args).
+        let redis_address = if ["redis_url", "redis_host", "redis_port", "redis_address"]
+            .iter()
+            .any(|k| explicit.contains(*k))
+        {
+            effective_redis_address(a)
+        } else {
+            effective_redis_address_file(&fc, a)
+        };
         let namespaces = fc
             .namespaces
             .into_iter()
             .map(|n| (n.name, n.options.into()))
             .collect();
         Ok(Settings {
-            // Config-file address/port win when present (Go honors them); otherwise
-            // fall back to the --address/--port flags (or their env vars).
-            address: fc.address.clone().unwrap_or_else(|| a.address.clone()),
-            port: fc.port.unwrap_or(a.port),
-            name: fc.name,
+            // Config-file address/port win when present (Go honors them) unless a
+            // flag/env set them explicitly; otherwise fall back to the flag default.
+            address: if explicit.contains("address") {
+                a.address.clone()
+            } else {
+                fc.address.clone().unwrap_or_else(|| a.address.clone())
+            },
+            port: if explicit.contains("port") {
+                a.port
+            } else {
+                fc.port.unwrap_or(a.port)
+            },
+            name: s("name", &a.name, fc.name),
             client_insecure: fc.client_insecure,
             client_anonymous: fc.client_anonymous,
-            client_presence_ping_interval: fc.client_presence_ping_interval,
-            client_presence_expire_interval: fc.client_presence_expire_interval,
-            token_hmac_secret_key: fc.token_hmac_secret_key,
-            token_rsa_public_key: fc.token_rsa_public_key,
-            token_ecdsa_public_key: fc.token_ecdsa_public_key,
-            token_jwks_public_endpoint: fc.token_jwks_public_endpoint,
-            api_key: fc.api_key,
+            client_presence_ping_interval: if explicit.contains("client_presence_ping_interval") {
+                a.client_presence_ping_interval
+            } else {
+                fc.client_presence_ping_interval
+            },
+            client_presence_expire_interval: if explicit.contains("client_presence_expire_interval")
+            {
+                a.client_presence_expire_interval
+            } else {
+                fc.client_presence_expire_interval
+            },
+            token_hmac_secret_key: s(
+                "token_hmac_secret_key",
+                &a.token_hmac_secret_key,
+                fc.token_hmac_secret_key,
+            ),
+            token_rsa_public_key: s(
+                "token_rsa_public_key",
+                &a.token_rsa_public_key,
+                fc.token_rsa_public_key,
+            ),
+            token_ecdsa_public_key: s(
+                "token_ecdsa_public_key",
+                &a.token_ecdsa_public_key,
+                fc.token_ecdsa_public_key,
+            ),
+            token_jwks_public_endpoint: s(
+                "token_jwks_public_endpoint",
+                &a.token_jwks_public_endpoint,
+                fc.token_jwks_public_endpoint,
+            ),
+            api_key: s("api_key", &a.api_key, fc.api_key),
             api_insecure: fc.api_insecure,
             grpc_api: fc.grpc_api,
-            grpc_api_port: fc.grpc_api_port,
-            grpc_api_key: fc.grpc_api_key,
-            engine: fc.engine,
+            grpc_api_port: if explicit.contains("grpc_api_port") {
+                a.grpc_api_port
+            } else {
+                fc.grpc_api_port
+            },
+            grpc_api_key: s("grpc_api_key", &a.grpc_api_key, fc.grpc_api_key),
+            engine: s("engine", &a.engine, fc.engine),
             redis_address,
-            redis_master_name: fc.redis_master_name,
-            redis_sentinels: fc.redis_sentinels,
-            redis_password: fc.redis_password,
-            redis_db: fc.redis_db,
-            redis_prefix: fc.redis_prefix,
-            redis_history_meta_ttl: fc.redis_history_meta_ttl,
-            proxy_connect_endpoint: fc.proxy_connect_endpoint,
-            proxy_refresh_endpoint: fc.proxy_refresh_endpoint,
-            proxy_subscribe_endpoint: fc.proxy_subscribe_endpoint,
-            proxy_publish_endpoint: fc.proxy_publish_endpoint,
-            proxy_rpc_endpoint: fc.proxy_rpc_endpoint,
+            redis_master_name: s(
+                "redis_master_name",
+                &a.redis_master_name,
+                fc.redis_master_name,
+            ),
+            redis_sentinels: s("redis_sentinels", &a.redis_sentinels, fc.redis_sentinels),
+            redis_password: s("redis_password", &a.redis_password, fc.redis_password),
+            redis_db: if explicit.contains("redis_db") {
+                a.redis_db
+            } else {
+                fc.redis_db
+            },
+            redis_prefix: s("redis_prefix", &a.redis_prefix, fc.redis_prefix),
+            redis_history_meta_ttl: if explicit.contains("redis_history_meta_ttl") {
+                a.redis_history_meta_ttl
+            } else {
+                fc.redis_history_meta_ttl
+            },
+            proxy_connect_endpoint: s(
+                "proxy_connect_endpoint",
+                &a.proxy_connect_endpoint,
+                fc.proxy_connect_endpoint,
+            ),
+            proxy_refresh_endpoint: s(
+                "proxy_refresh_endpoint",
+                &a.proxy_refresh_endpoint,
+                fc.proxy_refresh_endpoint,
+            ),
+            proxy_subscribe_endpoint: s(
+                "proxy_subscribe_endpoint",
+                &a.proxy_subscribe_endpoint,
+                fc.proxy_subscribe_endpoint,
+            ),
+            proxy_publish_endpoint: s(
+                "proxy_publish_endpoint",
+                &a.proxy_publish_endpoint,
+                fc.proxy_publish_endpoint,
+            ),
+            proxy_rpc_endpoint: s(
+                "proxy_rpc_endpoint",
+                &a.proxy_rpc_endpoint,
+                fc.proxy_rpc_endpoint,
+            ),
             admin: fc.admin,
             admin_insecure: fc.admin_insecure,
-            admin_password: fc.admin_password,
-            admin_secret: fc.admin_secret,
-            admin_web_path: fc.admin_web_path,
+            admin_password: s("admin_password", &a.admin_password, fc.admin_password),
+            admin_secret: s("admin_secret", &a.admin_secret, fc.admin_secret),
+            admin_web_path: s("admin_web_path", &a.admin_web_path, fc.admin_web_path),
             namespaces: Namespaces {
                 default: fc.options.into(),
                 namespaces,
@@ -557,13 +710,15 @@ mod tests {
 
     #[test]
     fn config_file_address_port_honored_else_flag() {
+        let none = ExplicitArgs::new();
         // File wins when it specifies address/port (Go honors them).
-        let s = Settings::from_file_and_args(r#"{"address":"1.2.3.4","port":9001}"#, &args(&[]))
-            .unwrap();
+        let s =
+            Settings::from_file_and_args(r#"{"address":"1.2.3.4","port":9001}"#, &args(&[]), &none)
+                .unwrap();
         assert_eq!(s.address, "1.2.3.4");
         assert_eq!(s.port, 9001);
         // Absent in file → fall back to the flag/default.
-        let s = Settings::from_file_and_args(r#"{}"#, &args(&["--port", "7777"])).unwrap();
+        let s = Settings::from_file_and_args(r#"{}"#, &args(&["--port", "7777"]), &none).unwrap();
         assert_eq!(s.port, 7777);
     }
 
@@ -572,8 +727,39 @@ mod tests {
         let s = Settings::from_file_and_args(
             r#"{"engine":"redis","redis_host":"cfg","redis_port":"6390"}"#,
             &args(&[]),
+            &ExplicitArgs::new(),
         )
         .unwrap();
         assert_eq!(s.redis_address, "cfg:6390");
+    }
+
+    #[test]
+    fn explicit_arg_beats_config_file() {
+        // M5: a serve arg set on the CLI/env beats a config-file value
+        // (viper precedence flag > env > file). `args(["--api_key", ...])`
+        // simulates the explicit set carrying "api_key".
+        let explicit: ExplicitArgs = ["api_key".to_string(), "port".to_string()]
+            .into_iter()
+            .collect();
+        let a = args(&["--api_key", "argkey", "--port", "9999"]);
+        let s =
+            Settings::from_file_and_args(r#"{"api_key":"filekey","port":18400}"#, &a, &explicit)
+                .unwrap();
+        assert_eq!(s.api_key, "argkey", "explicit arg must beat file api_key");
+        assert_eq!(s.port, 9999, "explicit arg must beat file port");
+    }
+
+    #[test]
+    fn config_file_used_when_arg_not_explicit() {
+        // Same args present but NOT in the explicit set (i.e. clap saw only the
+        // default) → the file value wins over the default.
+        let s = Settings::from_file_and_args(
+            r#"{"api_key":"filekey","port":18400}"#,
+            &args(&[]),
+            &ExplicitArgs::new(),
+        )
+        .unwrap();
+        assert_eq!(s.api_key, "filekey");
+        assert_eq!(s.port, 18400);
     }
 }
