@@ -41,3 +41,39 @@ fn checkconfig_accepts_valid_and_rejects_invalid() {
     let (code, _) = run_cli(&["checkconfig", "-c", bad.to_str().unwrap()]);
     assert_ne!(code, 0, "invalid config should fail");
 }
+
+#[test]
+fn checkconfig_enforces_validation_rules() {
+    // M6: checkconfig rejects the same semantic errors Go rejects (exit 1):
+    // history_recover with no window, a malformed namespace name, duplicate
+    // namespaces, and a personal-channel namespace that does not exist.
+    let dir = std::env::temp_dir();
+    let cases: &[(&str, &str)] = &[
+        ("m6-recover", r#"{"history_recover":true}"#),
+        ("m6-badns", r#"{"namespaces":[{"name":"ba!d"}]}"#),
+        (
+            "m6-dupns",
+            r#"{"namespaces":[{"name":"news"},{"name":"news"}]}"#,
+        ),
+        (
+            "m6-personal",
+            r#"{"user_personal_channel_namespace":"nope"}"#,
+        ),
+    ];
+    for (tag, body) in cases {
+        let p = dir.join(format!("centrifugo-cli-{tag}.json"));
+        std::fs::write(&p, body).unwrap();
+        let (code, _) = run_cli(&["checkconfig", "-c", p.to_str().unwrap()]);
+        assert_ne!(code, 0, "config {tag} must be rejected: {body}");
+    }
+
+    // A well-formed config with a valid namespace + recovery window passes.
+    let good = dir.join("centrifugo-cli-m6-good.json");
+    std::fs::write(
+        &good,
+        r#"{"history_size":10,"history_lifetime":60,"history_recover":true,"user_personal_channel_namespace":"personal","namespaces":[{"name":"personal"}]}"#,
+    )
+    .unwrap();
+    let (code, _) = run_cli(&["checkconfig", "-c", good.to_str().unwrap()]);
+    assert_eq!(code, 0, "valid config must pass checkconfig");
+}

@@ -1,7 +1,8 @@
 //! Effective server settings, built from CLI flags or a `-c` JSON config file.
 //! The config file is required to define `namespaces` (Go has no CLI flags for
-//! them); flags cover the single-namespace case. Full layered config (env/TOML/
-//! YAML, flag>file>env precedence) is M11; here `-c` is authoritative when given.
+//! them); flags cover the single-namespace case. Per-key precedence follows
+//! Go/viper: `flag > env > file > default` (see [`Settings::from_file_and_args`]
+//! and [`explicit_serve_args`]).
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -208,9 +209,11 @@ impl Settings {
             .expect("valid socket address")
     }
 
-    /// Overlay `CENTRIFUGO_*` environment variables as a fallback **below** flags
-    /// and the config file (the spec's flags > file > env precedence): a value
-    /// already set by a flag/file is kept; an unset one is filled from env.
+    /// Overlay `CENTRIFUGO_*` env vars onto fields still unset (no flag/file
+    /// value). Most scalars are already resolved by clap's `env` attribute (and
+    /// take precedence over the file via [`from_file_and_args`]); this fills the
+    /// remaining gaps and applies env "turn-on" for the bool flags (which have no
+    /// clap `env`). Per-key precedence remains flag > env > file > default.
     pub fn apply_env(&mut self) {
         fn env(key: &str) -> Option<String> {
             std::env::var(format!("CENTRIFUGO_{key}"))
@@ -488,10 +491,53 @@ impl Settings {
     }
 }
 
-/// Validate a config file body (parse + reject unknown structure). Used by the
-/// `checkconfig` subcommand.
+/// Validate a config file body: parse it, then apply Go's `rule.Config.Validate`
+/// rules. Used by the `checkconfig` subcommand and at server startup; a failure
+/// is a non-zero exit (Go logs fatal and exits 1).
 pub fn check_config(json: &str) -> anyhow::Result<()> {
-    let _fc: FileConfig = serde_json::from_str(json)?;
+    let fc: FileConfig = serde_json::from_str(json)?;
+    validate_file_config(&fc)
+}
+
+/// Mirror Go's `rule.Config.Validate` (rule.go): history recovery requires a
+/// history window, namespace names must match `^[-a-zA-Z0-9_.]{2,}$` and be
+/// unique, and `user_personal_channel_namespace` must reference a defined
+/// namespace. Each violation is fatal in Go (exit 1).
+fn validate_file_config(fc: &FileConfig) -> anyhow::Result<()> {
+    fn check_history(o: &ChannelOptionsCfg, scope: &str) -> anyhow::Result<()> {
+        if o.history_recover && (o.history_size == 0 || o.history_lifetime == 0) {
+            anyhow::bail!(
+                "both history size and history lifetime required for history recovery{scope}"
+            );
+        }
+        Ok(())
+    }
+    // Go's namespaceNameRe = `^[-a-zA-Z0-9_.]{2,}$`.
+    fn valid_namespace_name(name: &str) -> bool {
+        name.len() >= 2
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }
+    check_history(&fc.options, "")?;
+    let mut seen: HashSet<&str> = HashSet::new();
+    for ns in &fc.namespaces {
+        if !valid_namespace_name(&ns.name) {
+            anyhow::bail!("wrong namespace name: {}", ns.name);
+        }
+        if !seen.insert(&ns.name) {
+            anyhow::bail!("namespace name must be unique: {}", ns.name);
+        }
+        check_history(&ns.options, &format!(" in namespace {}", ns.name))?;
+    }
+    if !fc.user_personal_channel_namespace.is_empty()
+        && !seen.contains(fc.user_personal_channel_namespace.as_str())
+    {
+        anyhow::bail!(
+            "namespace for user personal channel not found: {}",
+            fc.user_personal_channel_namespace
+        );
+    }
     Ok(())
 }
 
@@ -747,6 +793,36 @@ mod tests {
                 .unwrap();
         assert_eq!(s.api_key, "argkey", "explicit arg must beat file api_key");
         assert_eq!(s.port, 9999, "explicit arg must beat file port");
+    }
+
+    #[test]
+    fn validate_rejects_history_recover_without_window() {
+        // M6: history_recover requires history_size>0 && history_lifetime>0.
+        assert!(check_config(r#"{"history_recover":true}"#).is_err());
+        assert!(check_config(r#"{"history_recover":true,"history_size":10}"#).is_err());
+        assert!(check_config(
+            r#"{"history_recover":true,"history_size":10,"history_lifetime":60}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_namespace_names() {
+        // Bad name (contains '!'), too short, duplicate -> error; clean -> ok.
+        assert!(check_config(r#"{"namespaces":[{"name":"ba!d"}]}"#).is_err());
+        assert!(check_config(r#"{"namespaces":[{"name":"a"}]}"#).is_err());
+        assert!(check_config(r#"{"namespaces":[{"name":"news"},{"name":"news"}]}"#).is_err());
+        assert!(check_config(r#"{"namespaces":[{"name":"news"},{"name":"chat.v2"}]}"#).is_ok());
+    }
+
+    #[test]
+    fn validate_personal_namespace_must_exist() {
+        // M6: user_personal_channel_namespace must reference a defined namespace.
+        assert!(check_config(r#"{"user_personal_channel_namespace":"nope"}"#).is_err());
+        assert!(check_config(
+            r#"{"user_personal_channel_namespace":"personal","namespaces":[{"name":"personal"}]}"#
+        )
+        .is_ok());
     }
 
     #[test]

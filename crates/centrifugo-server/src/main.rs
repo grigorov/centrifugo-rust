@@ -283,7 +283,10 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
     });
     let mut settings = match &config_path {
         Some(path) => {
-            Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args, &explicit)?
+            let json = std::fs::read_to_string(path)?;
+            // Go validates the rule config at startup and exits 1 on failure.
+            check_config(&json).map_err(|e| anyhow::anyhow!("invalid config {path}: {e}"))?;
+            Settings::from_file_and_args(&json, &args, &explicit)?
         }
         None => Settings::from_args(&args),
     };
