@@ -34,6 +34,74 @@ pub(crate) fn effective_redis_address(a: &ServeArgs) -> String {
     }
 }
 
+/// Config-file Redis target: `redis_url` > `redis_host`/`redis_port` > a non-default
+/// `redis_address` in the file; otherwise fall back to the flags/env (`a`).
+fn effective_redis_address_file(fc: &FileConfig, a: &ServeArgs) -> String {
+    if !fc.redis_url.is_empty() {
+        fc.redis_url.clone()
+    } else if !fc.redis_host.is_empty() || !fc.redis_port.is_empty() {
+        let host = if fc.redis_host.is_empty() {
+            "127.0.0.1"
+        } else {
+            &fc.redis_host
+        };
+        let port = if fc.redis_port.is_empty() {
+            "6379"
+        } else {
+            &fc.redis_port
+        };
+        format!("{host}:{port}")
+    } else if fc.redis_address != default_redis_address() {
+        fc.redis_address.clone()
+    } else {
+        effective_redis_address(a)
+    }
+}
+
+/// Official config keys this build does not implement — passing them in a config
+/// file loads cleanly (serde ignores unknown keys) but has no effect, so we warn.
+const INERT_CONFIG_KEYS: &[&str] = &[
+    "tls",
+    "tls_cert",
+    "tls_key",
+    "tls_external",
+    "allowed_origins",
+    "log_level",
+    "log_file",
+    "internal_address",
+    "internal_port",
+    "admin_external",
+    "broker",
+    "nats_url",
+    "debug",
+    "prometheus",
+    "health",
+    "redis_tls",
+    "redis_tls_skip_verify",
+    "redis_sentinel_password",
+    "sockjs",
+    "client_channel_limit",
+    "channel_max_length",
+];
+
+/// Warn for any [`INERT_CONFIG_KEYS`] present in the config JSON (so an operator
+/// isn't surprised that a security/operational knob silently has no effect).
+fn warn_inert_config_keys(json: &str) {
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(json) {
+        let present: Vec<&str> = INERT_CONFIG_KEYS
+            .iter()
+            .copied()
+            .filter(|k| map.contains_key(*k))
+            .collect();
+        if !present.is_empty() {
+            tracing::warn!(
+                "config keys accepted but not implemented in this build (no effect): {}",
+                present.join(", ")
+            );
+        }
+    }
+}
+
 pub struct Settings {
     pub address: String,
     pub port: u16,
@@ -211,6 +279,8 @@ impl Settings {
     /// the listen address/port, which come from flags).
     pub fn from_file_and_args(json: &str, a: &ServeArgs) -> anyhow::Result<Self> {
         let fc: FileConfig = serde_json::from_str(json)?;
+        warn_inert_config_keys(json);
+        let redis_address = effective_redis_address_file(&fc, a);
         let namespaces = fc
             .namespaces
             .into_iter()
@@ -234,7 +304,7 @@ impl Settings {
             grpc_api_port: fc.grpc_api_port,
             grpc_api_key: fc.grpc_api_key,
             engine: fc.engine,
-            redis_address: fc.redis_address,
+            redis_address,
             redis_master_name: fc.redis_master_name,
             redis_sentinels: fc.redis_sentinels,
             redis_password: fc.redis_password,
@@ -383,6 +453,13 @@ struct FileConfig {
     engine: String,
     #[serde(default = "default_redis_address")]
     redis_address: String,
+    // Go-compatible Redis target aliases (mapped into redis_address, redis_url wins).
+    #[serde(default)]
+    redis_host: String,
+    #[serde(default)]
+    redis_port: String,
+    #[serde(default)]
+    redis_url: String,
     #[serde(default)]
     redis_master_name: String,
     #[serde(default)]
