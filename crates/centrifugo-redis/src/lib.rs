@@ -402,6 +402,29 @@ async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn, self_uid: String
     }
 }
 
+/// True if a `redis://` URL string carries a password in its userinfo
+/// (`redis://user:pass@…` or `redis://:pass@…`). Used to decide whether the URL
+/// or the config `redis_password` wins (the URL wins when it specifies one).
+fn url_specifies_password(url: &str) -> bool {
+    let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    match authority.rsplit_once('@') {
+        Some((userinfo, _hostport)) => userinfo.contains(':'),
+        None => false,
+    }
+}
+
+/// True if a `redis://` URL string carries an explicit db in its path
+/// (`redis://host:port/4`). A bare authority or a trailing `/` is not explicit.
+fn url_specifies_db(url: &str) -> bool {
+    let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
+    let after_scheme = after_scheme.split(['?', '#']).next().unwrap_or(after_scheme);
+    match after_scheme.split_once('/') {
+        Some((_authority, db)) => !db.is_empty(),
+        None => false,
+    }
+}
+
 impl RedisEngine {
     /// Connect to Redis at `addr` (`host:port` or a full `redis://` URL) and spawn
     /// the pub/sub subscriber task that routes incoming messages via `route`.
@@ -416,13 +439,20 @@ impl RedisEngine {
         } else {
             format!("redis://{addr}")
         };
-        // Config `redis_password`/`redis_db` override any creds in the URL (Go
-        // applies them on top of the parsed address).
+        // Precedence matches Go: config `redis_password`/`redis_db` seed defaults,
+        // but a `redis_url` that *specifies* a password (userinfo) or db (path)
+        // wins — Go parses the address then prefers the URL's creds/db. Config is
+        // applied only where the URL omits the value (e.g. host:port form, or a
+        // URL with no userinfo / no `/db` path).
+        let url_specifies_password = addr.contains("://") && url_specifies_password(addr);
+        let url_specifies_db = addr.contains("://") && url_specifies_db(addr);
         let mut info = url.into_connection_info()?;
-        if let Some(pw) = opts.password.clone().filter(|p| !p.is_empty()) {
-            info.redis.password = Some(pw);
+        if !url_specifies_password {
+            if let Some(pw) = opts.password.clone().filter(|p| !p.is_empty()) {
+                info.redis.password = Some(pw);
+            }
         }
-        if opts.db != 0 {
+        if !url_specifies_db && opts.db != 0 {
             info.redis.db = opts.db;
         }
         let prefix = opts.prefix_or_default();
@@ -775,6 +805,57 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redis::IntoConnectionInfo;
+
+    #[test]
+    fn url_password_detection() {
+        assert!(url_specifies_password("redis://:testpw@127.0.0.1:6399/4"));
+        assert!(url_specifies_password("redis://user:pw@host"));
+        assert!(!url_specifies_password("redis://user@127.0.0.1:6399"));
+        assert!(!url_specifies_password("redis://127.0.0.1:6399"));
+        assert!(!url_specifies_password("redis://127.0.0.1:6399/4"));
+    }
+
+    #[test]
+    fn url_db_detection() {
+        assert!(url_specifies_db("redis://:testpw@127.0.0.1:6399/4"));
+        assert!(url_specifies_db("redis://127.0.0.1:6399/0"));
+        assert!(!url_specifies_db("redis://127.0.0.1:6399"));
+        assert!(!url_specifies_db("redis://127.0.0.1:6399/"));
+        assert!(!url_specifies_db("redis://127.0.0.1:6399?foo=bar"));
+    }
+
+    /// Mirror the precedence block in `connect`: the URL's db/password win when
+    /// specified; config seeds the rest. (into_connection_info is pure parsing.)
+    fn effective(addr: &str, cfg_db: i64, cfg_pw: Option<&str>) -> (i64, Option<String>) {
+        let mut info = addr.into_connection_info().unwrap();
+        if !url_specifies_password(addr) {
+            if let Some(pw) = cfg_pw.filter(|p| !p.is_empty()) {
+                info.redis.password = Some(pw.to_string());
+            }
+        }
+        if !url_specifies_db(addr) && cfg_db != 0 {
+            info.redis.db = cfg_db;
+        }
+        (info.redis.db, info.redis.password)
+    }
+
+    #[test]
+    fn redis_url_db_and_password_precedence_matches_go() {
+        // H4: URL db/password win over config when the URL specifies them.
+        let (db, pw) = effective("redis://:urlpw@127.0.0.1:6399/4", 7, Some("testpw"));
+        assert_eq!(db, 4, "URL path db must win over config redis_db");
+        assert_eq!(pw.as_deref(), Some("urlpw"), "URL password must win over config");
+
+        // Explicit db 0 in the URL wins (config db 7 ignored).
+        let (db, _) = effective("redis://127.0.0.1:6399/0", 7, None);
+        assert_eq!(db, 0, "explicit URL db 0 must win over config redis_db 7");
+
+        // URL omits db/password -> config applies as default.
+        let (db, pw) = effective("redis://127.0.0.1:6399", 7, Some("testpw"));
+        assert_eq!(db, 7, "config redis_db applies when URL omits a db path");
+        assert_eq!(pw.as_deref(), Some("testpw"), "config password applies when URL omits one");
+    }
 
     #[test]
     fn disconnect_control_roundtrips_whitelist_and_reconnect() {
