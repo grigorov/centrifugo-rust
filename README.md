@@ -40,7 +40,7 @@
 | Admin (`/admin/auth`, `/admin/api`) | ✅ аутентификация по токену + вендоренный web UI на `/` |
 | Метрики Prometheus (`/metrics`) | ✅ node-gauges + счётчики по командам/сообщениям/транспортам |
 | Конфигурация | ✅ флаги + JSON-файл (`-c`) + env (`CENTRIFUGO_*`) |
-| CLI-подкоманды | ✅ `serve`, `gentoken`, `genconfig`, `checkconfig`, `version` |
+| CLI-подкоманды | ✅ root-команда = сервер; `gentoken`, `checktoken`, `genconfig`, `checkconfig`, `version` |
 
 ---
 
@@ -87,11 +87,11 @@ cargo build --release          # бинарник: target/release/centrifugo
 #   rustup target add x86_64-unknown-linux-musl   # + musl-tools
 #   cargo build --release --target x86_64-unknown-linux-musl -p centrifugo-server
 
-# Запуск в insecure-режиме (без токенов)
-./target/release/centrifugo serve --client_insecure
+# Запуск сервера — root-команда (как у Go centrifugo; `serve` оставлен скрытым синонимом)
+./target/release/centrifugo --client_insecure
 
-# Запуск с конфиг-файлом
-./target/release/centrifugo serve -c config.json
+# С конфиг-файлом (без -c авто-читается ./config.json из рабочего каталога)
+./target/release/centrifugo -c config.json
 
 # Все тесты (юнит + конформанс)
 cargo test --workspace
@@ -110,6 +110,17 @@ docker compose up --build
 ```
 
 Клиент, подписанный на узле-1, получает сообщения, опубликованные через API узла-2, — демонстрация межузлового движка. `.dockerignore` держит build-контекст компактным (без `target/`, вендоренного Go-оракула и docs).
+
+### Совместимость с официальным образом (drop-in)
+
+Образ задуман как замена `centrifugo/centrifugo:v2.8.6`: root-команда запускает сервер, `centrifugo` лежит на `PATH`, рабочий каталог `/centrifugo` с авто-чтением `./config.json`, любой флаг читается и из `CENTRIFUGO_<ИМЯ>`, приняты официальные флаги/алиасы (вкл. `redis_host`/`redis_port`/`redis_url`), есть `checktoken`. Поэтому официальные команды работают как есть:
+
+```bash
+docker run -p 8000:8000 centrifugo-rust:local centrifugo --port 8000 --client_insecure
+docker run -p 8000:8000 -v ./config.json:/centrifugo/config.json centrifugo-rust:local
+```
+
+Неподдержанные возможности (TLS-в-процессе, NATS-брокер, отдельный internal-порт, Redis/gRPC-TLS) **принимаются с предупреждением**, а не рушат старт. Полный разбор по осям (запуск, флаги, env, сабкоманды, конфиг) и чек-лист миграции — в [`docs/COMPATIBILITY_v2.8.6.md`](docs/COMPATIBILITY_v2.8.6.md).
 
 ### Эндпоинты
 
@@ -154,12 +165,14 @@ docker compose up --build
 }
 ```
 
-Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
+Основные ключи: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), а также опции каналов: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`. Дополнительно — Go-совместимые алиасы Redis `redis_host`/`redis_port`/`redis_url` (маппятся в `redis_address`), `redis_db`, `redis_password`, `redis_prefix`, а также `name`, `log_level`, `pid_file`. Любой флаг сервера читается и из `CENTRIFUGO_<ИМЯ>` (как viper в Go).
 
 ### CLI-подкоманды
 
 ```bash
-centrifugo gentoken --token_hmac_secret_key <секрет> -u <user> [--ttl <сек>]   # выпуск JWT
+centrifugo --client_insecure                                                   # запуск сервера (root-команда)
+centrifugo gentoken --token_hmac_secret_key <секрет> -u <user> [-t <сек>]      # выпуск JWT (по умолчанию TTL 7 дней)
+centrifugo checktoken --token_hmac_secret_key <секрет> <JWT>                    # проверка JWT
 centrifugo genconfig -c config.json                                            # генерация конфига со случайными секретами
 centrifugo checkconfig -c config.json                                          # проверка конфига
 centrifugo version
@@ -190,7 +203,7 @@ cargo test --workspace
 
 ### Что проверяет каждый файл тестов
 
-Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 201 тест, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
+Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 205 тестов, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
 
 **Базовая проводная совместимость — M0–M12**
 
@@ -287,7 +300,7 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 - **m13–m21** — фазы полного Go-паритета (`#`-каналы, SUB_REFRESH, server-side каналы, TTL presence, гранулярные прокси, Protobuf HTTP API, разрешение публикации, Redis Sentinel, admin web UI).
 - **m22–m25** — исправления adversarial-аудита + пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам) и **полный interop Go⇄Rust на Redis** (pub/sub + история + presence + control + node-info).
 
-Всё завершено: **201 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
+Всё завершено: **205 тестов проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
 
 **Повторный adversarial-аудит** (после interop-, control- и refresh-изменений) нашёл 13 реальных расхождений с эталоном на Go — все исправлены, каждое с тестом:
 

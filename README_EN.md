@@ -40,7 +40,7 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | Admin (`/admin/auth`, `/admin/api`) | ✅ token auth + vendored web UI at `/` |
 | Prometheus metrics (`/metrics`) | ✅ node gauges + per-command/per-message/per-transport counters |
 | Configuration | ✅ flags + JSON file (`-c`) + env (`CENTRIFUGO_*`) |
-| CLI subcommands | ✅ `serve`, `gentoken`, `genconfig`, `checkconfig`, `version` |
+| CLI subcommands | ✅ root command = server; `gentoken`, `checktoken`, `genconfig`, `checkconfig`, `version` |
 
 ---
 
@@ -87,11 +87,11 @@ cargo build --release          # binary: target/release/centrifugo
 #   rustup target add x86_64-unknown-linux-musl   # + musl-tools
 #   cargo build --release --target x86_64-unknown-linux-musl -p centrifugo-server
 
-# Run in insecure mode (no tokens)
-./target/release/centrifugo serve --client_insecure
+# Run the server — root command (like Go centrifugo; `serve` kept as a hidden alias)
+./target/release/centrifugo --client_insecure
 
-# Run with a config file
-./target/release/centrifugo serve -c config.json
+# With a config file (without -c it auto-reads ./config.json from the working dir)
+./target/release/centrifugo -c config.json
 
 # All tests (unit + conformance)
 cargo test --workspace
@@ -110,6 +110,17 @@ docker compose up --build
 ```
 
 A client subscribed on node-1 receives messages published via node-2's API — demonstrating the cross-node engine. `.dockerignore` keeps the build context lean (no `target/`, vendored Go oracle, or docs).
+
+### Drop-in compatibility with the official image
+
+The image is meant as a substitute for `centrifugo/centrifugo:v2.8.6`: the root command runs the server, `centrifugo` is on `PATH`, the working dir is `/centrifugo` with `./config.json` auto-discovery, every flag is also read from `CENTRIFUGO_<NAME>`, the official flags/aliases (incl. `redis_host`/`redis_port`/`redis_url`) are accepted, and `checktoken` exists. So official commands work as-is:
+
+```bash
+docker run -p 8000:8000 centrifugo-rust:local centrifugo --port 8000 --client_insecure
+docker run -p 8000:8000 -v ./config.json:/centrifugo/config.json centrifugo-rust:local
+```
+
+Unimplemented features (in-process TLS, NATS broker, separate internal port, Redis/gRPC TLS) are **accepted with a warning** rather than aborting startup. Full per-surface breakdown (launch, flags, env, subcommands, config) and a migration checklist: [`docs/COMPATIBILITY_v2.8.6.md`](docs/COMPATIBILITY_v2.8.6.md).
 
 ### Endpoints
 
@@ -154,12 +165,14 @@ Example `config.json`:
 }
 ```
 
-Key options: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), plus channel options: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`.
+Key options: `client_insecure`, `client_anonymous`, `token_hmac_secret_key`, `token_rsa_public_key`, `token_ecdsa_public_key`, `token_jwks_public_endpoint`, `api_key`, `api_insecure`, `engine` (`memory`|`redis`), `redis_address`, `redis_master_name`, `redis_sentinels`, `client_presence_ping_interval`, `client_presence_expire_interval`, `proxy_connect_endpoint`, `proxy_refresh_endpoint`, `proxy_subscribe_endpoint`, `proxy_publish_endpoint`, `proxy_rpc_endpoint`, `grpc_api`, `grpc_api_port`, `grpc_api_key`, `admin`, `admin_insecure`, `admin_password`, `admin_secret`, `admin_web_path`, `user_subscribe_to_personal`, `user_personal_channel_namespace`, `channel_namespace_boundary` (`:`), `channel_private_prefix` (`$`), plus channel options: `presence`, `join_leave`, `presence_disable_for_client`, `publish`, `subscribe_to_publish`, `proxy_subscribe`, `proxy_publish`, `history_size`, `history_lifetime`, `history_recover`, `anonymous`, `server_side`. Plus the Go-compatible Redis aliases `redis_host`/`redis_port`/`redis_url` (mapped into `redis_address`), `redis_db`, `redis_password`, `redis_prefix`, and `name`, `log_level`, `pid_file`. Every server flag is also read from `CENTRIFUGO_<NAME>` (like Go's viper).
 
 ### CLI subcommands
 
 ```bash
-centrifugo gentoken --token_hmac_secret_key <secret> -u <user> [--ttl <sec>]   # issue a JWT
+centrifugo --client_insecure                                                   # run the server (root command)
+centrifugo gentoken --token_hmac_secret_key <secret> -u <user> [-t <sec>]      # issue a JWT (7-day TTL by default)
+centrifugo checktoken --token_hmac_secret_key <secret> <JWT>                   # verify a JWT
 centrifugo genconfig -c config.json                                            # generate a config with random secrets
 centrifugo checkconfig -c config.json                                          # validate a config
 centrifugo version
@@ -190,7 +203,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ### What each test file covers
 
-The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **201 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **205 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
 
 **Core wire compatibility — M0–M12**
 
@@ -287,7 +300,7 @@ Development ran across stages **M0–M25** (see the test-file breakdown above):
 - **m13–m21** — full Go-parity phases (`#`-channels, SUB_REFRESH, server-side channels, presence TTL, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI).
 - **m22–m25** — adversarial-audit fixes + post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics) and **full Go⇄Rust Redis interop** (pub/sub + history + presence + control + node-info).
 
-All complete: **201 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
+All complete: **205 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
 
 A **second adversarial audit** (after the interop, control, and refresh changes) found 13 real divergences from the Go reference — all fixed, each with a test:
 
