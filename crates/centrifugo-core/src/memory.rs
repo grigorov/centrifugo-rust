@@ -20,8 +20,12 @@ struct Stream {
     offset: u64,
     epoch: String,
     pubs: VecDeque<Publication>,
-    /// Unix seconds when this stream's history expires (lazy TTL).
+    /// Unix seconds when the buffered pubs expire (history_lifetime).
     expire_at: i64,
+    /// Unix seconds when the whole stream (its meta: offset + epoch) is dropped
+    /// after inactivity (`memory_history_meta_ttl`). `i64::MAX` = never (the
+    /// default, meta_ttl 0).
+    meta_expire_at: i64,
 }
 
 impl Stream {
@@ -31,6 +35,7 @@ impl Stream {
             epoch: new_epoch(),
             pubs: VecDeque::new(),
             expire_at: i64::MAX,
+            meta_expire_at: i64::MAX,
         }
     }
     fn position(&self) -> StreamPosition {
@@ -47,6 +52,10 @@ pub struct MemoryEngine {
     presence: Mutex<HashMap<String, HashMap<String, ClientInfo>>>,
     /// channel -> Stream.
     history: Mutex<HashMap<String, Stream>>,
+    /// `memory_history_meta_ttl` in seconds; 0 = streams are never removed
+    /// (centrifuge default). When > 0, an idle stream is dropped after this many
+    /// seconds, so its next publish restarts at offset 1 with a fresh epoch.
+    meta_ttl: i64,
 }
 
 impl MemoryEngine {
@@ -55,7 +64,14 @@ impl MemoryEngine {
             route,
             presence: Mutex::new(HashMap::new()),
             history: Mutex::new(HashMap::new()),
+            meta_ttl: 0,
         }
+    }
+
+    /// Set `memory_history_meta_ttl` (seconds; 0 keeps streams forever).
+    pub fn with_history_meta_ttl(mut self, secs: u64) -> Self {
+        self.meta_ttl = secs as i64;
+        self
     }
 
     /// Append to history and return the offset assigned to this publication.
@@ -67,6 +83,10 @@ impl MemoryEngine {
         opts: PublishOptions,
     ) -> u64 {
         let mut hist = self.history.lock();
+        // Drop a meta-expired stream first, so a publish after `meta_ttl` of
+        // inactivity restarts at offset 1 with a fresh epoch (centrifuge
+        // removeStreams), rather than continuing the stale offset.
+        Self::evict_if_expired(&mut hist, channel);
         let stream = hist.entry(channel.to_string()).or_insert_with(Stream::new);
         stream.offset += 1;
         let offset = stream.offset;
@@ -81,16 +101,27 @@ impl MemoryEngine {
             stream.pubs.pop_front();
         }
         stream.expire_at = now_unix() + opts.history_lifetime as i64;
+        stream.meta_expire_at = if self.meta_ttl > 0 {
+            now_unix() + self.meta_ttl
+        } else {
+            i64::MAX
+        };
         offset
     }
 
-    /// On history-lifetime expiry, drop only the buffered publications but keep
-    /// the stream's `offset` and `epoch` (matches centrifuge memstream `Clear()`:
-    /// the meta — top offset + epoch — persists, since `memory_history_meta_ttl`
-    /// defaults to 0 so streams are never removed). A caught-up client recovering
-    /// after the window therefore still gets `recovered=true` with its last
-    /// seq/gen, instead of a reset epoch/offset.
+    /// Lazy TTL eviction. If `memory_history_meta_ttl` elapsed since the last
+    /// publish, drop the whole stream (offset + epoch) so the next publish/read
+    /// rebuilds it fresh (centrifuge removeStreams). Otherwise, on history-lifetime
+    /// expiry drop only the buffered publications but keep the meta — matching
+    /// centrifuge memstream `Clear()`, so a caught-up client still recovers with
+    /// its last seq/gen when meta_ttl is 0 (the default; streams never removed).
     fn evict_if_expired(hist: &mut HashMap<String, Stream>, channel: &str) {
+        if let Some(s) = hist.get(channel) {
+            if now_unix() > s.meta_expire_at {
+                hist.remove(channel);
+                return;
+            }
+        }
         if let Some(s) = hist.get_mut(channel) {
             if now_unix() > s.expire_at {
                 s.pubs.clear();
@@ -296,6 +327,58 @@ mod tests {
         let (since, _) = engine.history_since("h", 1, &top.epoch).await.unwrap();
         assert_eq!(since.len(), 2);
         assert_eq!(since[0].offset, 2);
+    }
+
+    #[tokio::test]
+    async fn meta_ttl_resets_stream_after_inactivity() {
+        // L3: with memory_history_meta_ttl > 0, an idle stream is dropped, so the
+        // next publish restarts at offset 1 with a fresh epoch.
+        let engine = MemoryEngine::new(Arc::new(|_| {})).with_history_meta_ttl(3);
+        let opts = PublishOptions {
+            history_size: 10,
+            history_lifetime: 60,
+        };
+        for i in 1..=3 {
+            engine
+                .publish("h", format!("{{\"n\":{i}}}").as_bytes(), None, opts)
+                .await
+                .unwrap();
+        }
+        let (_, top1) = engine.history("h").await.unwrap();
+        assert_eq!(top1.offset, 3);
+        // Force the meta TTL to have elapsed.
+        engine.history.lock().get_mut("h").unwrap().meta_expire_at = now_unix() - 1;
+        engine
+            .publish("h", br#"{"n":99}"#, None, opts)
+            .await
+            .unwrap();
+        let (_, top2) = engine.history("h").await.unwrap();
+        assert_eq!(top2.offset, 1, "stream offset must reset after meta TTL");
+        assert_ne!(
+            top2.epoch, top1.epoch,
+            "epoch must flip after meta TTL reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_meta_ttl_keeps_offset_after_lifetime() {
+        // Default (meta_ttl 0): pubs window expiry clears publications but keeps
+        // the meta (offset + epoch), so recovery still works for caught-up clients.
+        let engine = MemoryEngine::new(Arc::new(|_| {}));
+        let opts = PublishOptions {
+            history_size: 10,
+            history_lifetime: 1,
+        };
+        engine
+            .publish("h", br#"{"n":1}"#, None, opts)
+            .await
+            .unwrap();
+        let epoch1 = engine.history("h").await.unwrap().1.epoch;
+        engine.history.lock().get_mut("h").unwrap().expire_at = now_unix() - 1;
+        let (pubs, top) = engine.history("h").await.unwrap();
+        assert!(pubs.is_empty(), "expired pubs must be cleared");
+        assert_eq!(top.offset, 1, "offset must persist when meta_ttl=0");
+        assert_eq!(top.epoch, epoch1, "epoch must persist when meta_ttl=0");
     }
 
     #[tokio::test]

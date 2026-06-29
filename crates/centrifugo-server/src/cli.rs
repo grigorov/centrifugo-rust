@@ -347,6 +347,14 @@ pub struct ServeArgs {
         default_value_t = 0
     )]
     pub redis_history_meta_ttl: u64,
+    /// Memory-engine history stream TTL in seconds (0 = streams never removed);
+    /// when set, an idle stream is dropped and restarts at offset 1 (matches Go).
+    #[arg(
+        long = "memory_history_meta_ttl",
+        env = "CENTRIFUGO_MEMORY_HISTORY_META_TTL",
+        default_value_t = 0
+    )]
+    pub memory_history_meta_ttl: u64,
     /// Log level: `debug` | `info` | `error` | `fatal` | `none` (Go-compatible).
     #[arg(
         long = "log_level",

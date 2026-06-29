@@ -386,11 +386,10 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
             };
             Arc::new(e)
         }
-        _ => Arc::new(MemoryEngine::new(make_route(
-            &hub,
-            &registry,
-            DEFAULT_USE_SEQ_GEN,
-        ))),
+        _ => Arc::new(
+            MemoryEngine::new(make_route(&hub, &registry, DEFAULT_USE_SEQ_GEN))
+                .with_history_meta_ttl(settings.memory_history_meta_ttl),
+        ),
     };
     // Node name (Go config `name`, default `hostname_port`) — display only;
     // routing/dedup use the UID.

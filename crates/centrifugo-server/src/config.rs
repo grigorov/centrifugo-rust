@@ -50,6 +50,7 @@ const PRECEDENCE_IDS: &[&str] = &[
     "redis_db",
     "redis_prefix",
     "redis_history_meta_ttl",
+    "memory_history_meta_ttl",
     "admin_password",
     "admin_secret",
     "admin_web_path",
@@ -189,6 +190,7 @@ pub struct Settings {
     pub redis_db: i64,
     pub redis_prefix: String,
     pub redis_history_meta_ttl: u64,
+    pub memory_history_meta_ttl: u64,
     pub proxy_connect_endpoint: String,
     pub proxy_refresh_endpoint: String,
     pub proxy_subscribe_endpoint: String,
@@ -304,6 +306,7 @@ impl Settings {
             redis_db: a.redis_db,
             redis_prefix: a.redis_prefix.clone(),
             redis_history_meta_ttl: a.redis_history_meta_ttl,
+            memory_history_meta_ttl: a.memory_history_meta_ttl,
             proxy_connect_endpoint: a.proxy_connect_endpoint.clone(),
             proxy_refresh_endpoint: a.proxy_refresh_endpoint.clone(),
             proxy_subscribe_endpoint: a.proxy_subscribe_endpoint.clone(),
@@ -448,6 +451,11 @@ impl Settings {
                 a.redis_history_meta_ttl
             } else {
                 fc.redis_history_meta_ttl
+            },
+            memory_history_meta_ttl: if explicit.contains("memory_history_meta_ttl") {
+                a.memory_history_meta_ttl
+            } else {
+                fc.memory_history_meta_ttl
             },
             proxy_connect_endpoint: s(
                 "proxy_connect_endpoint",
@@ -679,6 +687,8 @@ struct FileConfig {
     redis_prefix: String,
     #[serde(default)]
     redis_history_meta_ttl: u64,
+    #[serde(default)]
+    memory_history_meta_ttl: u64,
     #[serde(default)]
     proxy_connect_endpoint: String,
     #[serde(default)]
