@@ -406,7 +406,7 @@ async fn run_pubsub(pubsub: redis::aio::PubSub, route: RouteFn, self_uid: String
 /// (`redis://user:pass@…` or `redis://:pass@…`). Used to decide whether the URL
 /// or the config `redis_password` wins (the URL wins when it specifies one).
 fn url_specifies_password(url: &str) -> bool {
-    let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
+    let after_scheme = url.split_once("://").map(|x| x.1).unwrap_or(url);
     let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
     match authority.rsplit_once('@') {
         Some((userinfo, _hostport)) => userinfo.contains(':'),
@@ -417,7 +417,7 @@ fn url_specifies_password(url: &str) -> bool {
 /// True if a `redis://` URL string carries an explicit db in its path
 /// (`redis://host:port/4`). A bare authority or a trailing `/` is not explicit.
 fn url_specifies_db(url: &str) -> bool {
-    let after_scheme = url.splitn(2, "://").nth(1).unwrap_or(url);
+    let after_scheme = url.split_once("://").map(|x| x.1).unwrap_or(url);
     let after_scheme = after_scheme
         .split(['?', '#'])
         .next()
