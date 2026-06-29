@@ -146,10 +146,21 @@ async fn run_server(args: cli::ServeArgs) -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let mut settings = match &args.config {
+    // Like Go centrifugo, fall back to ./config.json in the working dir when no
+    // -c is given (so a mounted /centrifugo/config.json is picked up by a bare run).
+    let config_path = args.config.clone().or_else(|| {
+        let p = "config.json";
+        std::path::Path::new(p).exists().then(|| p.to_string())
+    });
+    let mut settings = match &config_path {
         Some(path) => Settings::from_file_and_args(&std::fs::read_to_string(path)?, &args)?,
         None => Settings::from_args(&args),
     };
+    if args.config.is_none() {
+        if let Some(p) = &config_path {
+            tracing::info!("auto-discovered config file {p}");
+        }
+    }
     settings.apply_env();
     // Go's verifier is JWKS-exclusive: when a JWKS endpoint is set it
     // verifies tokens ONLY by JWK (kid), never falling back to static

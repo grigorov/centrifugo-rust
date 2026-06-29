@@ -42,10 +42,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # ---- runtime: scratch (nothing but the static binary) ----
 FROM scratch
-COPY --from=builder /centrifugo /centrifugo
+# Put the binary on PATH as `centrifugo` so the official launch contract works
+# verbatim: `docker run IMG centrifugo -c config.json`, `centrifugo --client_insecure`.
+COPY --from=builder /centrifugo /usr/local/bin/centrifugo
+ENV PATH=/usr/local/bin
+# Go's image reads ./config.json from the working dir; WORKDIR creates the
+# (mountable) /centrifugo dir so `-v cfg:/centrifugo/config.json` is auto-discovered.
+WORKDIR /centrifugo
 # Numeric UID (no /etc/passwd on scratch); ports 8000 HTTP, 10000 gRPC.
 USER 10001
 EXPOSE 8000 10000
-ENTRYPOINT ["/centrifugo"]
-# Default for `docker run`; compose overrides `command:` with the cluster config.
-CMD ["serve", "--address", "0.0.0.0", "--client_insecure"]
+# No entrypoint (like the official image): the bare root command IS the server, so
+# `docker run IMG centrifugo [flags]` and `docker run IMG centrifugo <subcommand>` work.
+ENTRYPOINT []
+# Bare `docker run IMG` starts the server. Insecure default for local use; compose
+# overrides `command:` for the cluster.
+CMD ["centrifugo", "--client_insecure", "--address", "0.0.0.0"]

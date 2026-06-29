@@ -33,7 +33,7 @@ services:
       - "8000:8000"   # HTTP (WS/SockJS, API, admin, metrics)
       - "10000:10000" # gRPC API
     command:
-      - serve
+      - centrifugo
       - --address=0.0.0.0
       - --engine=redis
       - --redis_address=redis:6379
@@ -60,7 +60,7 @@ services:
       - "8001:8000"
       - "10001:10000"
     command:
-      - serve
+      - centrifugo
       - --address=0.0.0.0
       - --engine=redis
       - --redis_address=redis:6379
