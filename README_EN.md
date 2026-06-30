@@ -205,7 +205,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ### What each test file covers
 
-The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **260 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit and integration tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers, generated Protobuf contracts). **275 test entries in `cargo test --workspace -- --list`**; `perf` is a Go-vs-Rust benchmark marked `#[ignore]` and is not run by a plain `cargo test --workspace` (see [Performance](#performance)).
 
 **Core wire compatibility — M0–M12**
 
@@ -254,6 +254,13 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 | `m30_user_connection_limit` | `client_user_connection_limit` → DisconnectConnectionLimit (3013), per authenticated user |
 | `m31_history_disable_for_client` | `history_disable_for_client` → ErrorNotAvailable (108) even when history is stored |
 | `m32_allowed_origins` | `allowed_origins` enforced on the WS upgrade + SockJS (403 on mismatch; case-insensitive; absent Origin allowed) |
+
+**Generated Protobuf contract tests**
+
+| File | Covers |
+|---|---|
+| `crates/centrifugo-protocol/tests/generated_apipb.rs` | generated `prost` client-protocol types (`client.proto`): encode/decode round-trip, `encoded_len`, enum wire values, fixed golden bytes, domain ⇄ protobuf conversions, and `Raw` byte semantics |
+| `crates/centrifugo-grpc/tests/generated_apipb.rs` | generated `prost`/tonic server-API types (`api.proto`): request/response/result wrappers, error responses, `NodeResult`/`Metrics`, enum wire values, and fixed golden bytes |
 
 ---
 
@@ -311,7 +318,7 @@ Development ran across stages **M0–M32** (see the test-file breakdown above):
 - **m26–m28** — drop-in launch parity, post-audit protocol semantics (see below), and WS frame coalescing.
 - **m29–m32** — round-2 config/security audit: channel & per-user connection limits (`channel_max_length`/`client_channel_limit`/`client_user_connection_limit`), `history_disable_for_client`, and `allowed_origins` Origin enforcement on WS + SockJS — plus CLI bool-flag precedence over the config file (viper parity). See `docs/POSTAUDIT_v2.8.6.md` (Round 2).
 
-All complete: **241 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
+All complete: **275 test entries** (unit + integration + conformance, including `perf` in the list), 0 failures in the verified suites. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified). The generated Protobuf suites additionally pin the binary contract of `client.proto` and `api.proto`.
 
 A **second adversarial audit** (after the interop, control, and refresh changes) found 13 real divergences from the Go reference — all fixed, each with a test:
 

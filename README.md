@@ -205,7 +205,7 @@ cargo test --workspace
 
 ### Что проверяет каждый файл тестов
 
-Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 260 тестов, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
+Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит- и integration-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы, generated Protobuf-контракты). **Всего 275 test entries в `cargo test --workspace -- --list`**; `perf` — бенчмарк Go vs Rust, помечен `#[ignore]` и не запускается обычным `cargo test --workspace` (см. раздел [Производительность](#производительность)).
 
 **Базовая проводная совместимость — M0–M12**
 
@@ -254,6 +254,13 @@ cargo test --workspace
 | `m30_user_connection_limit` | `client_user_connection_limit` → DisconnectConnectionLimit (3013), на одного аутентифицированного пользователя |
 | `m31_history_disable_for_client` | `history_disable_for_client` → ErrorNotAvailable (108), даже когда история хранится |
 | `m32_allowed_origins` | `allowed_origins` на WS-upgrade + SockJS (403 при несовпадении; регистронезависимо; пустой Origin разрешён) |
+
+**Generated Protobuf contract tests**
+
+| Файл | Что проверяет |
+|---|---|
+| `crates/centrifugo-protocol/tests/generated_apipb.rs` | generated `prost`-типы client protocol (`client.proto`): encode/decode round-trip, `encoded_len`, wire-значения enum, fixed golden bytes, domain ⇄ protobuf conversions и семантика `Raw` bytes |
+| `crates/centrifugo-grpc/tests/generated_apipb.rs` | generated `prost`/tonic-типы server API (`api.proto`): request/response/result wrappers, error responses, `NodeResult`/`Metrics`, wire-значения enum и fixed golden bytes |
 
 ---
 
@@ -311,7 +318,7 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 - **m26–m28** — drop-in паритет запуска, пост-аудит семантика протокола (см. ниже) и коалесцирование WS-кадров.
 - **m29–m32** — round-2 аудит конфигурации/безопасности: лимиты каналов и подключений на пользователя (`channel_max_length`/`client_channel_limit`/`client_user_connection_limit`), `history_disable_for_client` и проверка `allowed_origins` (Origin) на WS + SockJS — плюс приоритет bool-флагов CLI над config-файлом (паритет с viper). См. `docs/POSTAUDIT_v2.8.6.md` (Round 2).
 
-Всё завершено: **241 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
+Всё завершено: **275 test entries** (юнит + integration + конформанс, включая `perf` в списке), 0 падений в проверенных наборах. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций). Generated Protobuf suites дополнительно фиксируют бинарный контракт `client.proto` и `api.proto`.
 
 **Повторный adversarial-аудит** (после interop-, control- и refresh-изменений) нашёл 13 реальных расхождений с эталоном на Go — все исправлены, каждое с тестом:
 
