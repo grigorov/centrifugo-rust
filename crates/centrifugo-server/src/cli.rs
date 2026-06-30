@@ -196,6 +196,9 @@ pub struct ServeArgs {
     /// Offer (re)subscribe recovery on channels.
     #[arg(long = "history_recover")]
     pub history_recover: bool,
+    /// Disable client-side HISTORY even when history is stored (default namespace).
+    #[arg(long = "history_disable_for_client")]
+    pub history_disable_for_client: bool,
     /// Server HTTP API key for apikey auth.
     #[arg(long = "api_key", env = "CENTRIFUGO_API_KEY", default_value = "")]
     pub api_key: String,

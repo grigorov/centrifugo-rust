@@ -36,6 +36,9 @@ pub struct ChannelOptions {
     pub history_lifetime: u64,
     /// Whether (re)subscribe recovery is offered on channels.
     pub history_recover: bool,
+    /// Disable client-side HISTORY even when history is stored (Go
+    /// `history_disable_for_client`); a client HISTORY then returns NotAvailable.
+    pub history_disable_for_client: bool,
     /// Allow anonymous (empty-user) clients to subscribe.
     pub anonymous: bool,
     /// Server-side-only channel: clients may not subscribe directly.
@@ -213,6 +216,29 @@ impl NodeRegistry {
     }
 }
 
+/// Node-wide subscribe/connection limits (Go centrifuge `node.config`). Defaults
+/// match Go centrifugo: `channel_max_length` 255, `client_channel_limit` 128.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Max channel-name byte length (0 = unlimited); over it → ErrorLimitExceeded.
+    pub channel_max_length: usize,
+    /// Max channels a single client may be subscribed to (0 = unlimited).
+    pub client_channel_limit: usize,
+    /// Max concurrent connections per authenticated user (0 = unlimited); over it
+    /// → DisconnectConnectionLimit. Never applies to the empty (anonymous) user.
+    pub user_connection_limit: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            channel_max_length: 255,
+            client_channel_limit: 128,
+            user_connection_limit: 0,
+        }
+    }
+}
+
 pub struct Node {
     /// Stable per-process node id (Go node UID); reported by the Info API.
     id: String,
@@ -247,6 +273,8 @@ pub struct Node {
     /// Use seq/gen instead of offset on the wire (centrifugo v2.8.6 default:
     /// config `v3_use_offset=false`). Real SDKs of this era expect seq/gen.
     use_seq_gen: bool,
+    /// Node-wide subscribe/connection limits (Go `node.config`).
+    limits: Limits,
 }
 
 /// centrifugo v2.8.6 default for the `UseSeqGen` compatibility flag (`v3_use_offset`
@@ -272,6 +300,7 @@ impl Node {
         registry: Arc<NodeRegistry>,
         version: String,
         name: String,
+        limits: Limits,
     ) -> Arc<Self> {
         let id = registry.self_uid().to_string();
         // Seed our own registry entry so the Info API always lists this node, even
@@ -299,6 +328,7 @@ impl Node {
             presence_ping_interval: Duration::from_secs(presence_ping_secs),
             presence_expire_ms: presence_expire_secs * 1000,
             use_seq_gen: DEFAULT_USE_SEQ_GEN,
+            limits,
         })
     }
 
@@ -329,6 +359,7 @@ impl Node {
             registry,
             "2.8.6".into(),
             "node".into(),
+            Limits::default(),
         )
     }
 
@@ -445,6 +476,22 @@ impl Node {
 
     pub fn use_seq_gen(&self) -> bool {
         self.use_seq_gen
+    }
+
+    /// Max channel-name byte length (Go `channel_max_length`, 0 = unlimited).
+    pub fn channel_max_length(&self) -> usize {
+        self.limits.channel_max_length
+    }
+
+    /// Max channels per client (Go `client_channel_limit`, 0 = unlimited).
+    pub fn client_channel_limit(&self) -> usize {
+        self.limits.client_channel_limit
+    }
+
+    /// Max concurrent connections per user (Go `client_user_connection_limit`,
+    /// 0 = unlimited).
+    pub fn user_connection_limit(&self) -> usize {
+        self.limits.user_connection_limit
     }
 
     /// How often a connection should re-assert its presence.

@@ -6,6 +6,7 @@ mod cli;
 mod config;
 mod grpc;
 mod http;
+mod origin;
 mod proxy_http;
 mod sockjs;
 mod webui;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 
 use centrifugo_auth::{gen_connect_token, TokenVerifier};
 use centrifugo_core::{
-    make_route, Engine, Hub, MemoryEngine, Node, NodeRegistry, DEFAULT_USE_SEQ_GEN,
+    make_route, Engine, Hub, Limits, MemoryEngine, Node, NodeRegistry, DEFAULT_USE_SEQ_GEN,
 };
 use centrifugo_redis::RedisEngine;
 use clap::{CommandFactory, FromArgMatches};
@@ -295,7 +296,7 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
             tracing::info!("auto-discovered config file {p}");
         }
     }
-    settings.apply_env();
+    settings.apply_env(&explicit);
     // Go's verifier is JWKS-exclusive: when a JWKS endpoint is set it
     // verifies tokens ONLY by JWK (kid), never falling back to static
     // keys. Mirror that by building the verifier with no static keys
@@ -411,6 +412,11 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
         registry,
         VERSION.to_string(),
         node_name,
+        Limits {
+            channel_max_length: settings.channel_max_length,
+            client_channel_limit: settings.client_channel_limit,
+            user_connection_limit: settings.client_user_connection_limit,
+        },
     );
     // Broadcast NODE-info pings + prune stale nodes (cluster membership).
     node.spawn_node_pings();
@@ -423,6 +429,8 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
         });
         tracing::info!("gRPC API listening on {grpc_addr}");
     }
-    let app = http::router(Arc::clone(&node), api_auth, admin_config);
+    // Origin allow-list for the WS/SockJS transports (Go allowed_origins).
+    let origin = Arc::new(origin::OriginChecker::new(settings.allowed_origins.clone()));
+    let app = http::router(Arc::clone(&node), api_auth, admin_config, origin);
     http::serve(addr, app).await
 }

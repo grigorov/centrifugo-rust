@@ -21,12 +21,14 @@
 | WebSocket-транспорт (`/connection/websocket`) | ✅ JSON (NDJSON) и Protobuf (`?format=protobuf`) |
 | SockJS-fallback (`/connection/sockjs`) | ✅ xhr-polling + `/info` + CORS |
 | Команды клиента | ✅ connect, subscribe, publish, unsubscribe, presence, presence_stats, history, refresh, ping, send, rpc, sub_refresh |
-| История и восстановление (recovery) | ✅ seq/gen, восстановление при (пере)подписке, descending-порядок |
+| История и восстановление (recovery) | ✅ seq/gen, восстановление при (пере)подписке, descending-порядок; `history_disable_for_client` → 108 |
 | Presence + join/leave | ✅ TTL presence (Redis) + таймер обновления на каждое соединение |
 | Принудительное истечение токена | ✅ таймер отключает истёкшие соединения (3005) / подписки (3006) после grace-окна |
 | Server-side каналы | ✅ `subs` в connect, JWT `channels` → авто-подписка |
 | User-limited (`#`) каналы | ✅ проверка членства `name#u1,u2` |
 | Разрешение на публикацию | ✅ опции канала `publish` / `subscribe_to_publish` |
+| Allow-list источников (`allowed_origins`) | ✅ WS-upgrade + SockJS; glob-шаблоны (`*`, `https://*.example.com`), регистронезависимо; 403 при несовпадении |
+| Лимиты соединений и каналов | ✅ `channel_max_length` (255), `client_channel_limit` (128) → 106; `client_user_connection_limit` → 3013 |
 | Аутентификация по JWT | ✅ HMAC (HS256/384/512), RSA (RS*), ECDSA (ES256/384) |
 | JWKS | ✅ выбор ключа по `kid`, фоновое обновление |
 | Прокси (HTTP-callbacks) | ✅ connect, refresh, subscribe, publish, rpc |
@@ -203,7 +205,7 @@ cargo test --workspace
 
 ### Что проверяет каждый файл тестов
 
-Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 241 тест, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
+Конформанс-набор лежит в `conformance/tests/` (по файлу на этап). Плюс юнит-тесты крейтов (кодек протокола, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/метрики, redis-хелперы). **Всего 260 тестов, 0 падений** (плюс `perf` — бенчмарк Go vs Rust, помечен `#[ignore]`, см. раздел [Производительность](#производительность)).
 
 **Базовая проводная совместимость — M0–M12**
 
@@ -237,7 +239,7 @@ cargo test --workspace
 | `m20_redis_sentinel` | обнаружение мастера через Redis Sentinel |
 | `m21_admin_ui` | admin web UI + `admin_web_path` |
 
-**Исправления аудита, пост-аудит фичи, drop-in и interop Go⇄Rust — m22–m28**
+**Исправления аудита, пост-аудит фичи, drop-in, interop Go⇄Rust и round-2 конфиг/безопасность — m22–m32**
 
 | Файл | Что проверяет |
 |---|---|
@@ -248,6 +250,10 @@ cargo test --workspace
 | `m26_dropin` | паритет запуска drop-in (неизвестные флаги не валят старт, admin через env, TTL gentoken, checktoken) |
 | `m27_protocol_semantics` | пост-аудит семантика ошибок/disconnect (битые params → 3003, неизвестный метод → 104, 2-й CONNECT/id==0/пустой кадр → 3003, RPC → 108, голый PING-reply) |
 | `m28_frame_coalescing` | WS-writer коалесцирует до 4 сообщений в кадр без потерь/перестановок |
+| `m29_channel_limits` | `channel_max_length` (255) + `client_channel_limit` (128) на SUBSCRIBE → 106 |
+| `m30_user_connection_limit` | `client_user_connection_limit` → DisconnectConnectionLimit (3013), на одного аутентифицированного пользователя |
+| `m31_history_disable_for_client` | `history_disable_for_client` → ErrorNotAvailable (108), даже когда история хранится |
+| `m32_allowed_origins` | `allowed_origins` на WS-upgrade + SockJS (403 при несовпадении; регистронезависимо; пустой Origin разрешён) |
 
 ---
 
@@ -271,11 +277,11 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 
 | Показатель | Rust | Go v2.8.6 | Соотношение |
 |---|---|---|---|
-| Fan-out, доставок/с | **~178 000** (100% доставлено) | ~65 000 (98.7–99.2%) | **Rust ≈ 2.7× быстрее** |
-| Задержка broadcast, медиана | **0.13 мс** | 0.20 мс | Rust ≈ на 35% ниже |
-| Задержка broadcast, p95 | **0.14 мс** | 0.38–0.45 мс | Rust ≈ в 3× ниже |
+| Fan-out, доставок/с | **~235 000** (100% доставлено) | ~66 000 (100%) | **Rust ≈ 3.5× быстрее** |
+| Задержка broadcast, медиана | **0.13 мс** | 0.14 мс | ≈ паритет (Rust чуть ниже) |
+| Задержка broadcast, p95 | **0.16 мс** | 0.16 мс | ≈ паритет |
 
-Под этой нагрузкой Go сбрасывает ~1% доставок (защита от медленного потребителя отключает отстающих подписчиков), а Rust доставляет 100%. Это микробенчмарк на одной машине — он показывает порядок разницы, а не абсолютные production-числа.
+Оба бэкенда доставляют 100% под этой нагрузкой; преимущество Rust — в пропускной способности fan-out. Это микробенчмарк на одной машине — он показывает порядок разницы по fan-out, а не абсолютные production-числа. (Бенч считает сообщения, а не WS-кадры: оба сервера коалесцируют до 4 сообщений в кадр, поэтому `perf.rs` суммирует NDJSON-строки — прежние числа здесь недосчитывали коалесцированные доставки.)
 
 ---
 
@@ -297,12 +303,13 @@ CENTRIFUGO_TEST_BIN="$PWD/target/release/centrifugo" \
 
 ## Статус
 
-Разработка шла по этапам **M0–M28** (см. разбивку по файлам тестов выше):
+Разработка шла по этапам **M0–M32** (см. разбивку по файлам тестов выше):
 
 - **M0–M12** — базовая проводная совместимость (транспорты, команды, история/восстановление, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, метрики, CLI, доказательство живым SDK).
 - **m13–m21** — фазы полного Go-паритета (`#`-каналы, SUB_REFRESH, server-side каналы, TTL presence, гранулярные прокси, Protobuf HTTP API, разрешение публикации, Redis Sentinel, admin web UI).
 - **m22–m25** — исправления adversarial-аудита + пост-аудит фичи (серверные unsubscribe/disconnect, персональные каналы, mid-flight failover Sentinel, метрики по командам) и **полный interop Go⇄Rust на Redis** (pub/sub + история + presence + control + node-info).
 - **m26–m28** — drop-in паритет запуска, пост-аудит семантика протокола (см. ниже) и коалесцирование WS-кадров.
+- **m29–m32** — round-2 аудит конфигурации/безопасности: лимиты каналов и подключений на пользователя (`channel_max_length`/`client_channel_limit`/`client_user_connection_limit`), `history_disable_for_client` и проверка `allowed_origins` (Origin) на WS + SockJS — плюс приоритет bool-флагов CLI над config-файлом (паритет с viper). См. `docs/POSTAUDIT_v2.8.6.md` (Round 2).
 
 Всё завершено: **241 тест проходит** (юнит + конформанс), 0 падений. Каждое проводное поведение сверено с настоящим Centrifugo v2.8.6 (golden-диффы) и подтверждено живым SDK **centrifuge-go v0.6.2** (подключается, подписывается, публикует, аутентифицируется по JWT — без модификаций).
 

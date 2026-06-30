@@ -12,11 +12,17 @@ use serde_json::json;
 
 use crate::admin::{self, AdminConfig};
 use crate::api::{self, ApiAuth};
+use crate::origin::OriginChecker;
 use crate::sockjs::{self, Sessions};
 use crate::webui;
 use crate::ws;
 
-pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> Router {
+pub fn router(
+    node: Arc<Node>,
+    api_auth: ApiAuth,
+    admin_config: AdminConfig,
+    origin: Arc<OriginChecker>,
+) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
@@ -48,6 +54,7 @@ pub fn router(node: Arc<Node>, api_auth: ApiAuth, admin_config: AdminConfig) -> 
     router
         .layer(Extension(api_auth))
         .layer(Extension(admin_config))
+        .layer(Extension(origin))
         .layer(Extension(Sessions::default()))
         .with_state(node)
 }

@@ -9,6 +9,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -513,6 +514,23 @@ impl WsJsonClient {
         WsJsonClient {
             ws,
             pending: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Attempt a WS handshake sending a custom `Origin` header. Returns the
+    /// connected client on a successful upgrade, or `Err(http_status)` when the
+    /// server rejects the upgrade (e.g. 403 for a disallowed origin).
+    pub async fn connect_with_origin(url: &str, origin: &str) -> Result<Self, u16> {
+        let mut req = url.into_client_request().expect("ws request");
+        req.headers_mut()
+            .insert("origin", origin.parse().expect("origin header"));
+        match connect_async(req).await {
+            Ok((ws, _resp)) => Ok(WsJsonClient {
+                ws,
+                pending: std::collections::VecDeque::new(),
+            }),
+            Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => Err(resp.status().as_u16()),
+            Err(e) => panic!("unexpected ws handshake error: {e:?}"),
         }
     }
 

@@ -54,6 +54,13 @@ const PRECEDENCE_IDS: &[&str] = &[
     "admin_password",
     "admin_secret",
     "admin_web_path",
+    // Bool flags Go binds via viper.BindPFlag: an explicit CLI flag beats the
+    // config file (these have no clap `env`, so env turn-on stays in apply_env).
+    "client_insecure",
+    "api_insecure",
+    "grpc_api",
+    "admin",
+    "admin_insecure",
 ];
 
 /// Build the set of serve args clap resolved from the CLI or a `CENTRIFUGO_*`
@@ -127,7 +134,6 @@ const INERT_CONFIG_KEYS: &[&str] = &[
     "tls_cert",
     "tls_key",
     "tls_external",
-    "allowed_origins",
     "log_level",
     "log_file",
     "internal_address",
@@ -142,8 +148,6 @@ const INERT_CONFIG_KEYS: &[&str] = &[
     "redis_tls_skip_verify",
     "redis_sentinel_password",
     "sockjs",
-    "client_channel_limit",
-    "channel_max_length",
 ];
 
 /// Warn for any [`INERT_CONFIG_KEYS`] present in the config JSON (so an operator
@@ -171,6 +175,17 @@ pub struct Settings {
     pub name: String,
     pub client_insecure: bool,
     pub client_anonymous: bool,
+    /// Max channel-name byte length (Go `channel_max_length`, default 255).
+    pub channel_max_length: usize,
+    /// Max channels a single client may subscribe to (Go `client_channel_limit`,
+    /// default 128).
+    pub client_channel_limit: usize,
+    /// Max concurrent connections per authenticated user (Go
+    /// `client_user_connection_limit`, default 0 = unlimited).
+    pub client_user_connection_limit: usize,
+    /// Allowed WS/SockJS request origins (Go `allowed_origins`). `None` = not
+    /// configured → all origins allowed; `Some(list)` → only matching origins.
+    pub allowed_origins: Option<Vec<String>>,
     pub client_presence_ping_interval: u64,
     pub client_presence_expire_interval: u64,
     pub token_hmac_secret_key: String,
@@ -211,16 +226,26 @@ impl Settings {
             .expect("valid socket address")
     }
 
-    /// Overlay `CENTRIFUGO_*` env vars onto fields still unset (no flag/file
-    /// value). Most scalars are already resolved by clap's `env` attribute (and
-    /// take precedence over the file via [`from_file_and_args`]); this fills the
-    /// remaining gaps and applies env "turn-on" for the bool flags (which have no
-    /// clap `env`). Per-key precedence remains flag > env > file > default.
-    pub fn apply_env(&mut self) {
+    /// Overlay `CENTRIFUGO_*` env vars. Most scalars are already resolved by clap's
+    /// `env` attribute (and take precedence over the file via [`from_file_and_args`]);
+    /// this fills the remaining gaps and resolves the bool flags (which have no clap
+    /// `env`): for the five Go binds via `viper.BindEnv`, a present env var overrides
+    /// the config file either way (incl. `false`), unless the flag was set explicitly
+    /// on the CLI. `explicit` names those CLI/env-explicit serve args. Per-key
+    /// precedence stays flag > env > file > default.
+    pub fn apply_env(&mut self, explicit: &ExplicitArgs) {
         fn env(key: &str) -> Option<String> {
             std::env::var(format!("CENTRIFUGO_{key}"))
                 .ok()
                 .filter(|s| !s.is_empty())
+        }
+        // Parse a bool env var the way Go's `strconv.ParseBool` (viper) does.
+        fn env_bool(key: &str) -> Option<bool> {
+            env(key).and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                "1" | "t" | "true" => Some(true),
+                "0" | "f" | "false" => Some(false),
+                _ => None,
+            })
         }
         fn fill(field: &mut String, key: &str) {
             if field.is_empty() {
@@ -238,25 +263,38 @@ impl Settings {
         );
         fill(&mut self.api_key, "API_KEY");
         fill(&mut self.proxy_connect_endpoint, "PROXY_CONNECT_ENDPOINT");
-        if !self.client_insecure && env("CLIENT_INSECURE").as_deref() == Some("true") {
-            self.client_insecure = true;
-        }
+        // The five bools Go binds via viper.BindEnv: a present env overrides the
+        // file (either value); an explicit CLI flag still wins (flag > env).
+        let env_bool_overlay = |id: &str, key: &str, current: bool| -> bool {
+            match (explicit.contains(id), env_bool(key)) {
+                (false, Some(v)) => v,
+                _ => current,
+            }
+        };
+        self.client_insecure =
+            env_bool_overlay("client_insecure", "CLIENT_INSECURE", self.client_insecure);
+        self.api_insecure = env_bool_overlay("api_insecure", "API_INSECURE", self.api_insecure);
+        self.grpc_api = env_bool_overlay("grpc_api", "GRPC_API", self.grpc_api);
+        self.admin = env_bool_overlay("admin", "ADMIN", self.admin);
+        self.admin_insecure =
+            env_bool_overlay("admin_insecure", "ADMIN_INSECURE", self.admin_insecure);
+        // client_anonymous is not viper-bound in Go (no BindEnv); keep one-way turn-on.
         if !self.client_anonymous && env("CLIENT_ANONYMOUS").as_deref() == Some("true") {
             self.client_anonymous = true;
         }
-        if !self.api_insecure && env("API_INSECURE").as_deref() == Some("true") {
-            self.api_insecure = true;
+        // Numeric/list keys Go binds via viper.BindEnv (read with GetInt /
+        // GetStringSlice): a present env overrides the config file. No CLI flag, so
+        // precedence is env > file > default. NOTE: client_user_connection_limit is
+        // intentionally absent — Go does NOT BindEnv it (config-file/default only).
+        if let Some(v) = env("CHANNEL_MAX_LENGTH").and_then(|s| s.trim().parse::<usize>().ok()) {
+            self.channel_max_length = v;
         }
-        // Boolean toggles official exposes via env (clap's bool+env is awkward, so
-        // they are handled here rather than as clap `env` attrs).
-        if !self.admin && env("ADMIN").as_deref() == Some("true") {
-            self.admin = true;
+        if let Some(v) = env("CLIENT_CHANNEL_LIMIT").and_then(|s| s.trim().parse::<usize>().ok()) {
+            self.client_channel_limit = v;
         }
-        if !self.admin_insecure && env("ADMIN_INSECURE").as_deref() == Some("true") {
-            self.admin_insecure = true;
-        }
-        if !self.grpc_api && env("GRPC_API").as_deref() == Some("true") {
-            self.grpc_api = true;
+        if let Some(s) = env("ALLOWED_ORIGINS") {
+            // viper GetStringSlice splits an env string on whitespace (cast strings.Fields).
+            self.allowed_origins = Some(s.split_whitespace().map(str::to_string).collect());
         }
         // Engine/redis address: overlay only when still at the built-in default.
         if self.engine == "memory" {
@@ -287,6 +325,12 @@ impl Settings {
             name: a.name.clone(),
             client_insecure: a.client_insecure,
             client_anonymous: a.client_anonymous,
+            // Not CLI flags (config/default only); Go defaults are 255 / 128 / 0.
+            channel_max_length: 255,
+            client_channel_limit: 128,
+            client_user_connection_limit: 0,
+            // No config file → allowed_origins not configured → allow all.
+            allowed_origins: None,
             client_presence_ping_interval: a.client_presence_ping_interval,
             client_presence_expire_interval: a.client_presence_expire_interval,
             token_hmac_secret_key: a.token_hmac_secret_key.clone(),
@@ -325,6 +369,7 @@ impl Settings {
                     history_size: a.history_size,
                     history_lifetime: a.history_lifetime,
                     history_recover: a.history_recover,
+                    history_disable_for_client: a.history_disable_for_client,
                     anonymous: false,
                     server_side: false,
                     proxy_subscribe: false,
@@ -361,6 +406,15 @@ impl Settings {
                 file
             }
         };
+        // Bool field: same precedence. Used for the viper.BindPFlag bools, where
+        // an explicit CLI flag must beat the file (Go: flag > file).
+        let b = |id: &str, arg: bool, file: bool| -> bool {
+            if explicit.contains(id) {
+                arg
+            } else {
+                file
+            }
+        };
         // Redis target: if any redis address arg was set explicitly, the arg
         // combination wins; otherwise resolve from the file (falling back to args).
         let redis_address = if ["redis_url", "redis_host", "redis_port", "redis_address"]
@@ -390,8 +444,15 @@ impl Settings {
                 fc.port.unwrap_or(a.port)
             },
             name: s("name", &a.name, fc.name),
-            client_insecure: fc.client_insecure,
+            client_insecure: b("client_insecure", a.client_insecure, fc.client_insecure),
+            // client_anonymous is not in Go's viper.BindPFlag set, so it stays
+            // file-sourced (a CLI flag does not override it, matching Go).
             client_anonymous: fc.client_anonymous,
+            // Config/default only (no CLI flag); serde defaults to 255 / 128 / 0.
+            channel_max_length: fc.channel_max_length,
+            client_channel_limit: fc.client_channel_limit,
+            client_user_connection_limit: fc.client_user_connection_limit,
+            allowed_origins: fc.allowed_origins,
             client_presence_ping_interval: if explicit.contains("client_presence_ping_interval") {
                 a.client_presence_ping_interval
             } else {
@@ -424,8 +485,8 @@ impl Settings {
                 fc.token_jwks_public_endpoint,
             ),
             api_key: s("api_key", &a.api_key, fc.api_key),
-            api_insecure: fc.api_insecure,
-            grpc_api: fc.grpc_api,
+            api_insecure: b("api_insecure", a.api_insecure, fc.api_insecure),
+            grpc_api: b("grpc_api", a.grpc_api, fc.grpc_api),
             grpc_api_port: if explicit.contains("grpc_api_port") {
                 a.grpc_api_port
             } else {
@@ -482,8 +543,8 @@ impl Settings {
                 &a.proxy_rpc_endpoint,
                 fc.proxy_rpc_endpoint,
             ),
-            admin: fc.admin,
-            admin_insecure: fc.admin_insecure,
+            admin: b("admin", a.admin, fc.admin),
+            admin_insecure: b("admin_insecure", a.admin_insecure, fc.admin_insecure),
             admin_password: s("admin_password", &a.admin_password, fc.admin_password),
             admin_secret: s("admin_secret", &a.admin_secret, fc.admin_secret),
             admin_web_path: s("admin_web_path", &a.admin_web_path, fc.admin_web_path),
@@ -564,6 +625,8 @@ struct ChannelOptionsCfg {
     #[serde(default)]
     history_recover: bool,
     #[serde(default)]
+    history_disable_for_client: bool,
+    #[serde(default)]
     anonymous: bool,
     #[serde(default)]
     server_side: bool,
@@ -586,6 +649,7 @@ impl From<ChannelOptionsCfg> for ChannelOptions {
             history_size: c.history_size,
             history_lifetime: c.history_lifetime,
             history_recover: c.history_recover,
+            history_disable_for_client: c.history_disable_for_client,
             anonymous: c.anonymous,
             server_side: c.server_side,
             proxy_subscribe: c.proxy_subscribe,
@@ -611,6 +675,12 @@ fn default_private_prefix() -> String {
 }
 fn default_grpc_port() -> u16 {
     10000
+}
+fn default_channel_max_length() -> usize {
+    255
+}
+fn default_client_channel_limit() -> usize {
+    128
 }
 fn default_presence_ping() -> u64 {
     25
@@ -642,6 +712,15 @@ struct FileConfig {
     client_insecure: bool,
     #[serde(default)]
     client_anonymous: bool,
+    #[serde(default = "default_channel_max_length")]
+    channel_max_length: usize,
+    #[serde(default = "default_client_channel_limit")]
+    client_channel_limit: usize,
+    #[serde(default)]
+    client_user_connection_limit: usize,
+    // Absent → None (allow all origins); present (incl. []) → Some(list).
+    #[serde(default)]
+    allowed_origins: Option<Vec<String>>,
     #[serde(default = "default_presence_ping")]
     client_presence_ping_interval: u64,
     #[serde(default = "default_presence_expire")]
@@ -847,5 +926,72 @@ mod tests {
         .unwrap();
         assert_eq!(s.api_key, "filekey");
         assert_eq!(s.port, 18400);
+    }
+
+    #[test]
+    fn explicit_serve_args_detects_viper_bound_bools() {
+        // F1: the bool flags Go binds via viper.BindPFlag (client_insecure,
+        // api_insecure, grpc_api, admin, admin_insecure) must be recognized as
+        // explicit when set on the CLI — otherwise from_file_and_args can't let
+        // them beat a config file.
+        use clap::CommandFactory;
+        let m = crate::cli::Cli::command()
+            .try_get_matches_from(["centrifugo", "--client_insecure", "--grpc_api", "--admin"])
+            .unwrap();
+        let explicit = explicit_serve_args(&m);
+        assert!(explicit.contains("client_insecure"));
+        assert!(explicit.contains("grpc_api"));
+        assert!(explicit.contains("admin"));
+        // A bool flag not passed must not appear in the explicit set.
+        assert!(!explicit.contains("api_insecure"));
+        assert!(!explicit.contains("admin_insecure"));
+    }
+
+    #[test]
+    fn explicit_bool_flag_beats_config_file() {
+        // F1: an explicitly-set CLI bool flag overrides the config-file value,
+        // matching Go viper.BindPFlag precedence (flag > file). The file sets all
+        // five viper-bound bools false; the explicit CLI flags must win.
+        let explicit: ExplicitArgs = [
+            "client_insecure".to_string(),
+            "api_insecure".to_string(),
+            "grpc_api".to_string(),
+            "admin".to_string(),
+            "admin_insecure".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let a = args(&[
+            "--client_insecure",
+            "--api_insecure",
+            "--grpc_api",
+            "--admin",
+            "--admin_insecure",
+        ]);
+        let json = r#"{"client_insecure":false,"api_insecure":false,"grpc_api":false,"admin":false,"admin_insecure":false}"#;
+        let s = Settings::from_file_and_args(json, &a, &explicit).unwrap();
+        assert!(
+            s.client_insecure,
+            "explicit --client_insecure must beat file"
+        );
+        assert!(s.api_insecure, "explicit --api_insecure must beat file");
+        assert!(s.grpc_api, "explicit --grpc_api must beat file");
+        assert!(s.admin, "explicit --admin must beat file");
+        assert!(s.admin_insecure, "explicit --admin_insecure must beat file");
+    }
+
+    #[test]
+    fn bool_flag_from_file_when_not_explicit() {
+        // No CLI flag set → the config-file bool value applies (regression guard
+        // that the explicit overlay does not clobber file-sourced bools).
+        let s = Settings::from_file_and_args(
+            r#"{"client_insecure":true,"grpc_api":true,"admin":true}"#,
+            &args(&[]),
+            &ExplicitArgs::new(),
+        )
+        .unwrap();
+        assert!(s.client_insecure);
+        assert!(s.grpc_api);
+        assert!(s.admin);
     }
 }

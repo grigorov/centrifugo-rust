@@ -21,12 +21,14 @@ The goal is byte-for-byte compatibility with clients that **cannot be updated**.
 | WebSocket transport (`/connection/websocket`) | ✅ JSON (NDJSON) and Protobuf (`?format=protobuf`) |
 | SockJS fallback (`/connection/sockjs`) | ✅ xhr-polling + `/info` + CORS |
 | Client commands | ✅ connect, subscribe, publish, unsubscribe, presence, presence_stats, history, refresh, ping, send, rpc, sub_refresh |
-| History & recovery | ✅ seq/gen, recovery on (re)subscribe, descending order |
+| History & recovery | ✅ seq/gen, recovery on (re)subscribe, descending order; `history_disable_for_client` → 108 |
 | Presence + join/leave | ✅ presence TTL (Redis) + per-connection refresh timer |
 | Token expiry enforcement | ✅ timer disconnects expired connections (3005) / subscriptions (3006) after a grace window |
 | Server-side channels | ✅ `subs` in connect, JWT `channels` → auto-subscribe |
 | User-limited (`#`) channels | ✅ `name#u1,u2` membership check |
 | Publish permission | ✅ `publish` / `subscribe_to_publish` channel options |
+| Origin allow-listing (`allowed_origins`) | ✅ WS upgrade + SockJS; glob patterns (`*`, `https://*.example.com`), case-insensitive; 403 on mismatch |
+| Connection & channel limits | ✅ `channel_max_length` (255), `client_channel_limit` (128) → 106; `client_user_connection_limit` → 3013 |
 | JWT authentication | ✅ HMAC (HS256/384/512), RSA (RS*), ECDSA (ES256/384) |
 | JWKS | ✅ key selection by `kid`, background refresh |
 | Proxies (HTTP callbacks) | ✅ connect, refresh, subscribe, publish, rpc |
@@ -203,7 +205,7 @@ Tests requiring external dependencies (Go oracle, Redis, Go SDK) **skip cleanly*
 
 ### What each test file covers
 
-The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **241 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
+The conformance suite lives in `conformance/tests/` (one file per stage). Plus crate unit tests (protocol codec, auth/JWT, core `Client`/`Hub`/`Node`/`NodeRegistry`/metrics, redis helpers). **260 tests total, 0 failures** (plus `perf` — a Go-vs-Rust benchmark marked `#[ignore]`, see [Performance](#performance)).
 
 **Core wire compatibility — M0–M12**
 
@@ -237,7 +239,7 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 | `m20_redis_sentinel` | Redis Sentinel master discovery |
 | `m21_admin_ui` | admin web UI + `admin_web_path` |
 
-**Audit fixes, post-audit features, drop-in & Go⇄Rust interop — m22–m28**
+**Audit fixes, post-audit features, drop-in, Go⇄Rust interop & round-2 config/security — m22–m32**
 
 | File | Covers |
 |---|---|
@@ -248,6 +250,10 @@ The conformance suite lives in `conformance/tests/` (one file per stage). Plus c
 | `m26_dropin` | drop-in launch parity (unknown flags don't abort startup, admin via env, gentoken TTL, checktoken) |
 | `m27_protocol_semantics` | post-audit error/disconnect semantics (malformed params → 3003, unknown method → 104, 2nd CONNECT/id==0/empty frame → 3003, RPC → 108, bare PING reply) |
 | `m28_frame_coalescing` | WS writer coalesces up to 4 messages per frame without loss/reorder |
+| `m29_channel_limits` | `channel_max_length` (255) + `client_channel_limit` (128) enforced at SUBSCRIBE → 106 |
+| `m30_user_connection_limit` | `client_user_connection_limit` → DisconnectConnectionLimit (3013), per authenticated user |
+| `m31_history_disable_for_client` | `history_disable_for_client` → ErrorNotAvailable (108) even when history is stored |
+| `m32_allowed_origins` | `allowed_origins` enforced on the WS upgrade + SockJS (403 on mismatch; case-insensitive; absent Origin allowed) |
 
 ---
 
@@ -271,11 +277,11 @@ Measured on a **MacBook (Apple M4 Pro, 12 cores, 24 GB RAM)**, median of 3 runs,
 
 | Metric | Rust | Go v2.8.6 | Ratio |
 |---|---|---|---|
-| Fan-out, deliveries/s | **~178,000** (100% delivered) | ~65,000 (98.7–99.2%) | **Rust ≈ 2.7× faster** |
-| Broadcast latency, median | **0.13 ms** | 0.20 ms | Rust ≈ 35% lower |
-| Broadcast latency, p95 | **0.14 ms** | 0.38–0.45 ms | Rust ≈ 3× lower |
+| Fan-out, deliveries/s | **~235,000** (100% delivered) | ~66,000 (100%) | **Rust ≈ 3.5× faster** |
+| Broadcast latency, median | **0.13 ms** | 0.14 ms | ≈ parity (Rust marginally lower) |
+| Broadcast latency, p95 | **0.16 ms** | 0.16 ms | ≈ parity |
 
-Under this load Go sheds ~1% of deliveries (slow-consumer protection drops lagging subscribers) while Rust delivers 100%. This is a single-machine microbenchmark — it shows the order-of-magnitude difference, not absolute production numbers.
+Both backends deliver 100% at this load; Rust's edge is fan-out throughput. This is a single-machine microbenchmark — it shows the order-of-magnitude fan-out difference, not absolute production numbers. (The bench counts messages, not WS frames: both servers coalesce up to 4 messages per frame, so `perf.rs` sums NDJSON lines — earlier figures here undercounted coalesced deliveries.)
 
 ---
 
@@ -297,12 +303,13 @@ Under this load Go sheds ~1% of deliveries (slow-consumer protection drops laggi
 
 ## Status
 
-Development ran across stages **M0–M28** (see the test-file breakdown above):
+Development ran across stages **M0–M32** (see the test-file breakdown above):
 
 - **M0–M12** — core wire compatibility (transports, commands, history/recovery, presence, JWT/JWKS, namespaces, HTTP/gRPC API, Redis, SockJS, admin, metrics, CLI, live-SDK proof).
 - **m13–m21** — full Go-parity phases (`#`-channels, SUB_REFRESH, server-side channels, presence TTL, granular proxies, Protobuf HTTP API, publish permission, Redis Sentinel, admin web UI).
 - **m22–m25** — adversarial-audit fixes + post-audit features (server-side unsubscribe/disconnect, personal channels, Sentinel mid-flight failover, per-command metrics) and **full Go⇄Rust Redis interop** (pub/sub + history + presence + control + node-info).
 - **m26–m28** — drop-in launch parity, post-audit protocol semantics (see below), and WS frame coalescing.
+- **m29–m32** — round-2 config/security audit: channel & per-user connection limits (`channel_max_length`/`client_channel_limit`/`client_user_connection_limit`), `history_disable_for_client`, and `allowed_origins` Origin enforcement on WS + SockJS — plus CLI bool-flag precedence over the config file (viper parity). See `docs/POSTAUDIT_v2.8.6.md` (Round 2).
 
 All complete: **241 tests pass** (unit + conformance), 0 failures. Every wire behavior is checked against the real Centrifugo v2.8.6 (golden diffs) and confirmed by the live **centrifuge-go v0.6.2** SDK (connects, subscribes, publishes, authenticates with a JWT — unmodified).
 

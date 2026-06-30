@@ -172,3 +172,97 @@ Note on dedup: the `protocol-codec` and `client-commands` runs independently con
 9. **L6 (epoch format)** — cosmetic; skip unless exact token byte-parity is mandated.
 
 Relevant source files: `crates/centrifugo-core/src/client.rs`, `crates/centrifugo-core/src/node.rs`, `crates/centrifugo-core/src/memory.rs`, `crates/centrifugo-auth/src/claims.rs`, `crates/centrifugo-auth/src/verifier.rs`, `crates/centrifugo-protocol/src/method.rs`, `crates/centrifugo-protocol/src/messages.rs`, `crates/centrifugo-protocol/src/error.rs`, `crates/centrifugo-redis/src/lib.rs`, `crates/centrifugo-server/src/ws.rs`, `crates/centrifugo-server/src/sockjs.rs`, `crates/centrifugo-server/src/config.rs`, `crates/centrifugo-server/src/main.rs`.
+
+---
+
+## Round 2 — targeted config / security audit (all fixed)
+
+A second targeted pass against the local Go oracle + the `centrifuge@v0.14.2` source
+focused on config precedence, subscribe/connect limits, and origin security. Each
+finding below was independently verified (confirm + adversarial-refute) against both
+codebases and then fixed test-first. **F1–F5 were confirmed and are fixed; F6 was a
+false positive.**
+
+### F1. CLI bool flags were dropped when a config file was loaded (High — fixed)
+- **Was:** `Settings::from_file_and_args` sourced `client_insecure`, `api_insecure`,
+  `grpc_api`, `admin`, `admin_insecure` straight from the file, ignoring an explicit
+  CLI flag. With `-c {}` + `--client_insecure`, Rust still rejected an insecure
+  connect (Go, via `viper.BindPFlag`, accepts it: flag beats file).
+- **Go:** `main.go:239` binds these bools via `viper.BindPFlag`, so an explicitly-set
+  flag wins over the config file.
+- **Fix:** the five viper-bound bools join `PRECEDENCE_IDS` and get the explicit-arg
+  overlay in `from_file_and_args` (`config.rs`). `client_anonymous` stays file-sourced
+  (Go does **not** bind it). Tests: `config::tests::explicit_bool_flag_beats_config_file`,
+  `explicit_serve_args_detects_viper_bound_bools`.
+- **Follow-up (from the round-2 review):** Go also binds these five via `viper.BindEnv`,
+  so a present `CENTRIFUGO_*` env var overrides the config file **either way** (incl.
+  `false`) — `apply_env` previously only turned bools *on*, which was fail-open for the
+  insecure flags (an operator could not disable a file `admin_insecure:true` via env).
+  Fixed: `apply_env` now resolves each bool from a present env var (parsed like Go's
+  `strconv.ParseBool`), unless the CLI flag was set explicitly (flag > env > file). Test:
+  `m11_env::env_bool_false_overrides_config_file_true`.
+
+### F2. `channel_max_length` / `client_channel_limit` not enforced (High — fixed)
+- **Was:** both keys were inert; `on_subscribe` enforced neither, so a 256-char
+  channel and a 129th subscription were accepted where Go returns `106`.
+- **Go:** `validateSubscribeRequest` (`client.go:1841-1875`) — `len(channel) > 255`
+  → `106`, then `numChannels >= 128` → `106` (defaults `main.go:84,90`).
+- **Fix:** node-wide `Limits` (`node.rs`), checked in `on_subscribe` in Go order
+  (length `>`, then count `>=`, both before the already-subscribed check); keys plumbed
+  out of `INERT_CONFIG_KEYS` with defaults 255 / 128. Tests: `m29_channel_limits`.
+
+### F3. `allowed_origins` ignored — Origin never checked (High, security — fixed)
+- **Was:** `allowed_origins` was inert and neither the WS upgrade nor the SockJS
+  handlers read the `Origin` header — any cross-origin browser could connect.
+- **Go:** installs `CheckOrigin` on **both** transports (`main.go:1226-1289`,
+  `internal/origin`): gobwas/glob match of the lowercased Origin; empty Origin allowed;
+  mismatch → handshake rejected (HTTP 403).
+- **Fix:** new `origin::OriginChecker` (glob `*`/`?`, case-insensitive on the Origin,
+  empty-Origin allowed, unconfigured = allow-all) wired as an Extension and enforced in
+  `ws_handler` and the SockJS `xhr`/`xhr_send` handlers (403 on mismatch).
+  Tests: `origin::tests` (6), `m32_allowed_origins` (WS + SockJS).
+- **Known limitation (fail-closed):** the matcher implements the common gobwas/glob
+  subset — `*` and `?` — which covers every realistic origin pattern (`*`,
+  `https://*.example.com`, exact hosts). gobwas's brace alternation (`{a,b}`),
+  character classes (`[a-z]`) and backslash escaping are **not** supported: such a
+  pattern is matched literally and a real Origin won't match it, so the request is
+  **rejected** (403), never wrongly allowed — fail-closed, no bypass. Use explicit
+  `*`/`?` patterns (one allowlist entry per origin) instead of brace/class syntax.
+
+### F4. `client_user_connection_limit` ignored (Medium — fixed)
+- **Was:** no such config field; CONNECT registered every connection unconditionally.
+- **Go:** `client.go:1664` — `limit > 0 && user != "" && count >= limit` →
+  `DisconnectConnectionLimit` (3013, reconnect=false); default 0.
+- **Fix:** added to `Limits`; checked in the connect path before `hub().add()` using
+  `hub.user_clients(user).len()`. Tests: `m30_user_connection_limit`.
+
+### F5. `history_disable_for_client` ignored (Medium — fixed)
+- **Was:** `on_history` gated only on `history_enabled()`, so client HISTORY returned
+  publications even with the flag set.
+- **Go:** `handler.go:527` — `HistorySize<=0 || HistoryLifetime<=0 ||
+  HistoryDisableForClient` → `ErrorNotAvailable` (108).
+- **Fix:** `history_disable_for_client` added to `ChannelOptions` (mirroring
+  `presence_disable_for_client`) and OR'd into the 108 gate in `on_history`.
+  Tests: `m31_history_disable_for_client`.
+
+### F6. "Official CLI flags rejected" — **false positive (not a bug)**
+The claim that `--websocket_disable` / `--api_handler_prefix` / `--allowed_origins` are
+wrongly rejected as CLI flags is incorrect: these are **config-file/env keys**, not
+cobra flags, in Go too — Go's `cmd.Flags()` does not define them, so `centrifugo
+--websocket_disable` is an unknown flag on **both** servers. Rust already registers
+every flag Go's `bindPFlags` exposes. (`allowed_origins` as a *config key* is now
+honored — see F3; `websocket_disable`/`api_handler_prefix` remain accepted-but-no-op
+config keys, unchanged.)
+
+### Note: env support for the new numeric/list keys
+Go binds env vars explicitly (a `viper.BindEnv` list, `main.go:182-225`) — there is no
+`AutomaticEnv`, so only listed keys are env-overridable. Matching that exactly:
+- `channel_max_length`, `client_channel_limit`, `allowed_origins` **are** in Go's
+  `bindEnvs`, so they are now read from `CENTRIFUGO_*` too (env > file > default).
+  `CENTRIFUGO_ALLOWED_ORIGINS` is whitespace-split, matching viper's `GetStringSlice`
+  (cast `strings.Fields`). Implemented in `apply_env`. Tests:
+  `m11_env::env_overrides_channel_max_length`, `m11_env::env_provides_allowed_origins`.
+- `client_user_connection_limit` is **not** in Go's `bindEnvs` (only a default at
+  `main.go:88` + config file), so it is intentionally config-file/default only here too;
+  a `CENTRIFUGO_CLIENT_USER_CONNECTION_LIMIT` is ignored, matching Go. Guard test:
+  `m30_user_connection_limit::connection_limit_is_not_env_overridable`.

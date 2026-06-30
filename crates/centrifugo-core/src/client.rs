@@ -338,6 +338,16 @@ impl Client {
         self.conn_info = info;
         self.expire_at = expire_at;
         self.authenticated = true;
+        // Per-user connection limit (Go client_user_connection_limit): reject when
+        // the user already has >= limit live connections. Never applies to the
+        // empty (anonymous) user. Checked before registering (Go client.go:1664).
+        let conn_limit = self.node.user_connection_limit();
+        if conn_limit > 0
+            && !self.user.is_empty()
+            && self.node.hub().user_clients(&self.user).len() >= conn_limit
+        {
+            return CommandOutcome::disconnect(Disconnect::connection_limit());
+        }
         self.node.metrics().inc_connect(self.transport);
         self.node.hub().add(ClientHandle {
             id: self.id.clone(),
@@ -425,6 +435,20 @@ impl Client {
         // Go validateSubscribeRequest: empty channel -> DisconnectBadRequest (3003).
         if req.channel.is_empty() {
             return CommandOutcome::disconnect(Disconnect::bad_request());
+        }
+        // Channel name too long -> ErrorLimitExceeded (106). Byte length, `>`
+        // (255-char ok, 256 rejected); checked before the channel count and the
+        // already-subscribed check, matching Go's validateSubscribeRequest order.
+        let max_len = self.node.channel_max_length();
+        if max_len > 0 && req.channel.len() > max_len {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::limit_exceeded())]);
+        }
+        // Per-client channel count limit -> ErrorLimitExceeded (106). Count is the
+        // current subscription total (server-side + client), tested before insert
+        // with `>=` (Go: numChannels >= channelLimit).
+        let chan_limit = self.node.client_channel_limit();
+        if chan_limit > 0 && self.subscriptions.len() >= chan_limit {
+            return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::limit_exceeded())]);
         }
         // Already subscribed -> ErrorAlreadySubscribed (105), checked before the
         // namespace/permission logic (matches Go's validateSubscribeRequest order).
@@ -603,13 +627,18 @@ impl Client {
             Ok(r) => r,
             Err(_) => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
-        let history_enabled = match self.node.channel_options(&req.channel) {
-            Some(o) => o.history_enabled(),
+        let (history_enabled, history_disable_for_client) = match self
+            .node
+            .channel_options(&req.channel)
+        {
+            Some(o) => (o.history_enabled(), o.history_disable_for_client),
             None => {
                 return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::unknown_channel())])
             }
         };
-        if !history_enabled {
+        // Go handler.go:527: not available when history is off OR client-side
+        // history is disabled for the channel (history_disable_for_client).
+        if !history_enabled || history_disable_for_client {
             return CommandOutcome::replies(vec![Reply::err(cmd.id, Error::not_available())]);
         }
         if !self.is_subscribed(&req.channel) {
@@ -1159,7 +1188,7 @@ mod tests {
         use crate::engine::Engine;
         use crate::hub::Hub;
         use crate::memory::MemoryEngine;
-        use crate::node::{make_route, Namespaces, NodeRegistry};
+        use crate::node::{make_route, Limits, Namespaces, NodeRegistry};
         let hub = Arc::new(Hub::new());
         let registry = Arc::new(NodeRegistry::new("test".into()));
         let engine: Arc<dyn Engine> =
@@ -1181,6 +1210,7 @@ mod tests {
             registry,
             "2.8.6".into(),
             "node".into(),
+            Limits::default(),
         )
     }
 

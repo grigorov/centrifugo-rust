@@ -10,8 +10,12 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{RawQuery, State};
-use axum::response::Response;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use centrifugo_core::{Node, Out, Signal};
+
+use crate::origin::OriginChecker;
 use centrifugo_protocol::codec::{decode_commands, encode_replies, ProtocolType};
 use centrifugo_protocol::Disconnect;
 use futures_util::{SinkExt, StreamExt};
@@ -30,9 +34,17 @@ const MAX_MESSAGE_SIZE: usize = 65536; // 64KB, matching centrifuge default
 
 pub async fn ws_handler(
     State(node): State<Arc<Node>>,
+    Extension(origin): Extension<Arc<OriginChecker>>,
+    headers: HeaderMap,
     RawQuery(query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Reject the upgrade when the request Origin is not allow-listed (Go's
+    // CheckOrigin → gorilla rejects the handshake with HTTP 403).
+    let origin_hdr = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    if !origin.check(origin_hdr) {
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    }
     let proto = proto_from_query(query.as_deref());
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_MESSAGE_SIZE)

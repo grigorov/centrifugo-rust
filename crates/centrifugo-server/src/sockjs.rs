@@ -20,10 +20,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use centrifugo_core::{Node, Out, Signal};
+
+use crate::origin::OriginChecker;
 use centrifugo_protocol::codec::{decode_commands, encode_replies, ProtocolType};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -48,6 +50,13 @@ pub struct Sessions {
 }
 
 static ENTROPY: AtomicU32 = AtomicU32::new(2_154_001_001);
+
+/// Whether the request's `Origin` header passes the configured allow-list (Go
+/// applies CheckOrigin to the SockJS transport as well as the WS upgrade).
+fn origin_allowed(origin: &OriginChecker, headers: &HeaderMap) -> bool {
+    let hdr = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    origin.check(hdr)
+}
 
 /// `GET /connection/sockjs/info` — transport capabilities. `websocket:true`
 /// matches Go; clients that pick SockJS-WS and find it absent fall back to xhr.
@@ -76,8 +85,13 @@ pub async fn options() -> Response {
 pub async fn xhr(
     State(node): State<Arc<Node>>,
     Extension(sessions): Extension<Sessions>,
+    Extension(origin): Extension<Arc<OriginChecker>>,
+    headers: HeaderMap,
     Path((_server, session_id)): Path<(String, String)>,
 ) -> Response {
+    if !origin_allowed(&origin, &headers) {
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    }
     let existing = sessions.map.lock().get(&session_id).cloned();
     let session = match existing {
         // A brand-new session: open it and return the SockJS open frame.
@@ -116,9 +130,14 @@ pub async fn xhr(
 /// `POST /connection/sockjs/:server/:session/xhr_send` — push commands.
 pub async fn xhr_send(
     Extension(sessions): Extension<Sessions>,
+    Extension(origin): Extension<Arc<OriginChecker>>,
+    headers: HeaderMap,
     Path((_server, session_id)): Path<(String, String)>,
     body: String,
 ) -> Response {
+    if !origin_allowed(&origin, &headers) {
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    }
     let Some(session) = sessions.map.lock().get(&session_id).cloned() else {
         return (StatusCode::NOT_FOUND, cors_headers()).into_response();
     };

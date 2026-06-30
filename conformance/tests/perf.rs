@@ -48,13 +48,18 @@ async fn connect_sub(
     )))
     .await
     .unwrap();
-    // Drain the connect + subscribe replies (both carry "id").
+    // Drain the connect + subscribe replies (both carry "id"). The WS writer may
+    // COALESCE them into one NDJSON frame (up to 4 messages/frame, see m28), so
+    // count reply *lines*, not frames; break on close so a dropped connection
+    // can't spin forever on `None`.
     let mut acks = 0;
     while acks < 2 {
-        if let Some(Ok(Message::Text(t))) = ws.next().await {
-            if t.contains(r#""id":"#) {
-                acks += 1;
+        match ws.next().await {
+            Some(Ok(Message::Text(t))) => {
+                acks += t.lines().filter(|l| l.contains(r#""id":"#)).count();
             }
+            Some(Ok(_)) => {} // ping/binary
+            _ => break,       // closed/error
         }
     }
     ws
@@ -109,8 +114,13 @@ async fn fanout_throughput(ws_url: &str, http: &str) -> (f64, usize, usize) {
             let _ = ready_tx.send(()).await;
             while !stop.load(Ordering::Relaxed) {
                 match ws.next().await {
-                    Some(Ok(Message::Text(t))) if is_push(&t) => {
-                        delivered.fetch_add(1, Ordering::Relaxed);
+                    Some(Ok(Message::Text(t))) => {
+                        // A frame may coalesce up to 4 pushes (m28); count push
+                        // *lines*, not frames, or throughput is undercounted.
+                        let n = t.lines().filter(|l| is_push(l)).count();
+                        if n > 0 {
+                            delivered.fetch_add(n, Ordering::Relaxed);
+                        }
                     }
                     Some(Ok(_)) => {}
                     _ => break, // closed/error (e.g. backend dropped a slow client)
