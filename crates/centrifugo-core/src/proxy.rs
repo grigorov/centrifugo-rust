@@ -23,6 +23,8 @@ pub struct ProxyConnectRequest {
 pub struct ProxyConnectReply {
     pub user: String,
     pub info: Option<Vec<u8>>,
+    /// Connect data forwarded to the client in the connect reply.
+    pub data: Option<Vec<u8>>,
     /// Unix seconds; 0 = no expiry.
     pub expire_at: i64,
     /// Server-side channels the proxy granted (Go credentials.Channels →

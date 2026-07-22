@@ -33,7 +33,7 @@ impl Disconnect {
             reason: &self.reason,
             reconnect: self.reconnect,
         };
-        let s = serde_json::to_string(&t).expect("disconnect close text");
+        let s = serde_json::to_string(&t).unwrap_or_default();
         debug_assert!(s.len() < 127, "disconnect close text must be < 127 bytes");
         s
     }

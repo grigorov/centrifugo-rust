@@ -149,7 +149,6 @@ struct NodeResult {
     num_users: u32,
     num_channels: u32,
     uptime: u32,
-    // Go emits `"metrics":null` (non-omitempty); per-node metrics are not collected.
     metrics: Option<serde_json::Value>,
 }
 
@@ -498,7 +497,10 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                         num_users: n.num_users,
                         num_channels: n.num_channels,
                         uptime: n.uptime,
-                        metrics: None,
+                        metrics: n.metrics.map(|m| serde_json::json!({
+                            "interval": m.interval,
+                            "items": m.items,
+                        })),
                     })
                     .collect(),
             },
@@ -651,15 +653,21 @@ async fn dispatch_pb(node: &Arc<Node>, cmd: pb::Command) -> pb::Reply {
             let nodes = node
                 .info_nodes()
                 .into_iter()
-                .map(|n| pb::NodeResult {
-                    uid: n.uid,
-                    name: n.name,
-                    version: n.version,
-                    num_clients: n.num_clients,
-                    num_users: n.num_users,
-                    num_channels: n.num_channels,
-                    uptime: n.uptime,
-                    metrics: None,
+                .map(|n| {
+                    let metrics = n.metrics.as_ref().map(|m| pb::Metrics {
+                        interval: m.interval,
+                        items: m.items.clone(),
+                    });
+                    pb::NodeResult {
+                        uid: n.uid,
+                        name: n.name,
+                        version: n.version,
+                        num_clients: n.num_clients,
+                        num_users: n.num_users,
+                        num_channels: n.num_channels,
+                        uptime: n.uptime,
+                        metrics,
+                    }
                 })
                 .collect();
             reply(None, pb::InfoResult { nodes }.encode_to_vec())

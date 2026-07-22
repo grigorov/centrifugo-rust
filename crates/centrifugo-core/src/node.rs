@@ -118,7 +118,7 @@ impl Namespaces {
 
     /// Whether `channel` is a private (token-protected) channel.
     pub fn is_private(&self, channel: &str) -> bool {
-        !self.private_prefix.is_empty() && channel.starts_with(&self.private_prefix)
+        channel.starts_with(&self.private_prefix)
     }
 
     /// The personal channel for `user` (Go `PersonalChannel`): `#<user>`, or
@@ -378,6 +378,11 @@ impl Node {
         &self.id
     }
 
+    /// Server version string (Go `config.Version`, e.g. "2.8.6").
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
     /// Seconds since this node started (Info `uptime`).
     pub fn uptime(&self) -> u32 {
         (now_unix() - self.started_unix).max(0) as u32
@@ -397,6 +402,7 @@ impl Node {
             me.num_users = self.hub.num_users() as u32;
             me.num_channels = self.hub.num_channels() as u32;
             me.uptime = self.uptime();
+            me.metrics = Some(self.metrics.snapshot());
         }
         nodes
     }
@@ -411,6 +417,7 @@ impl Node {
             num_users: self.hub.num_users() as u32,
             num_channels: self.hub.num_channels() as u32,
             uptime: self.uptime(),
+            metrics: Some(self.metrics.snapshot()),
         }
     }
 

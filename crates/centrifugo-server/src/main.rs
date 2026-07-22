@@ -29,6 +29,9 @@ const VERSION: &str = "2.8.6";
 /// `gentoken`: print an HS256 connection JWT. The secret comes from `--config`'s
 /// `token_hmac_secret_key` (or the `--token_hmac_secret_key` flag, which wins).
 fn gentoken(args: GentokenArgs) -> anyhow::Result<()> {
+    if args.user.is_empty() {
+        anyhow::bail!("usage: centrifugo gentoken -u <user>");
+    }
     let secret = if !args.token_hmac_secret_key.is_empty() {
         args.token_hmac_secret_key
     } else if let Some(path) = &args.config {
@@ -64,9 +67,10 @@ fn gentoken(args: GentokenArgs) -> anyhow::Result<()> {
 /// `checktoken`: verify a connection JWT against the HMAC secret and print its
 /// claims (mirrors Go's `checktoken`). Non-zero exit on a missing/invalid token.
 fn checktoken(args: cli::ChecktokenArgs) -> anyhow::Result<()> {
-    let token = args
-        .token
-        .ok_or_else(|| anyhow::anyhow!("usage: centrifugo checktoken [TOKEN]"))?;
+    if args.token.is_empty() {
+        anyhow::bail!("usage: centrifugo checktoken [TOKEN]");
+    }
+    let token = args.token;
     let secret = if !args.token_hmac_secret_key.is_empty() {
         args.token_hmac_secret_key
     } else if let Some(path) = &args.config {
@@ -395,7 +399,7 @@ async fn run_server(args: cli::ServeArgs, explicit: ExplicitArgs) -> anyhow::Res
     // Node name (Go config `name`, default `hostname_port`) — display only;
     // routing/dedup use the UID.
     let node_name = if settings.name.is_empty() {
-        format!("{}_{}", hostname(), settings.port)
+        format!("{}:{}", hostname(), settings.port)
     } else {
         settings.name.clone()
     };

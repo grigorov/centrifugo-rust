@@ -64,7 +64,7 @@ pub struct ChecktokenArgs {
     #[arg(long = "token_hmac_secret_key", default_value = "")]
     pub token_hmac_secret_key: String,
     /// The connection JWT to check.
-    pub token: Option<String>,
+    pub token: String,
 }
 
 #[derive(clap::Args, Debug)]

@@ -72,7 +72,7 @@ pub(crate) struct SubState {
 }
 
 /// Resolved connect credentials: (user, conn_info, expire_at, server-side channels).
-type Creds = (String, Option<Vec<u8>>, i64, Vec<String>);
+type Creds = (String, Option<Vec<u8>>, Option<Vec<u8>>, i64, Vec<String>);
 
 pub struct Client {
     pub id: ClientId,
@@ -256,7 +256,7 @@ impl Client {
                     } else {
                         ct.expire_at
                     };
-                    Some((ct.user, ct.info, expire_at, ct.channels))
+                    Some((ct.user, ct.info, None, expire_at, ct.channels))
                 }
                 // Expired connect token -> error reply (109).
                 Err(VerifyError::Expired) => {
@@ -278,13 +278,13 @@ impl Client {
                     ProtocolType::Json => "json".into(),
                     ProtocolType::Protobuf => "protobuf".into(),
                 },
-                data: None,
+                data: req.data.map(|r| r.0),
             };
             match proxy.connect(preq).await {
                 // Go builds ConnectReply.Subscriptions from credentials.Channels;
                 // surface them so the server-side-subscribe + 102-validation loop runs.
                 Ok(ProxyConnectOutcome::Credentials(r)) => {
-                    Some((r.user, r.info, r.expire_at, r.channels))
+                    Some((r.user, r.info, r.data, r.expire_at, r.channels))
                 }
                 // Explicit proxy error -> relay that code/message as an error reply.
                 Ok(ProxyConnectOutcome::Error { code, message }) => {
@@ -310,10 +310,10 @@ impl Client {
 
         // Anonymous/insecure fallback to an empty-user connection when no
         // identity was established; otherwise reject.
-        let (user, info, expire_at, mut channels) = match creds {
+        let (user, info, data, expire_at, mut channels) = match creds {
             Some(c) => c,
             None if self.node.client_anonymous() || self.node.client_insecure() => {
-                (String::new(), None, 0, Vec::new())
+                (String::new(), None, None, 0, Vec::new())
             }
             None => return CommandOutcome::disconnect(Disconnect::bad_request()),
         };
@@ -372,11 +372,11 @@ impl Client {
         };
         let result = ConnectResult {
             client: self.id.clone(),
-            version: String::new(),
+            version: self.node.version().to_string(),
             expires,
             ttl,
+            data: data.map(Raw::from_bytes),
             subs,
-            ..Default::default()
         };
         CommandOutcome::replies(vec![ok_reply(self.proto, cmd.id, &result)])
     }
@@ -906,7 +906,7 @@ impl Client {
                     }
                     let result = RefreshResult {
                         client: self.id.clone(),
-                        version: String::new(),
+                        version: self.node.version().to_string(),
                         expires: true,
                         ttl: ttl as u32,
                     };
@@ -914,7 +914,7 @@ impl Client {
                 }
                 let result = RefreshResult {
                     client: self.id.clone(),
-                    version: String::new(),
+                    version: self.node.version().to_string(),
                     expires: false,
                     ttl: 0,
                 };

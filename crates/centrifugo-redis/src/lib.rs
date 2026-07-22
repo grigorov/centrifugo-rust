@@ -330,6 +330,7 @@ fn decode_control(bytes: &[u8], self_uid: &str) -> Option<ControlMessage> {
                 num_users: n.num_users,
                 num_channels: n.num_channels,
                 uptime: n.uptime,
+                metrics: None,
             }))
         }
     }
@@ -726,9 +727,7 @@ impl Engine for RedisEngine {
 
     async fn remove_history(&self, channel: &str) -> anyhow::Result<()> {
         let mut conn = self.mgr.read().await.clone();
-        let _: () = conn
-            .del(&[self.meta_key(channel), self.list_key(channel)])
-            .await?;
+        let _: () = conn.del(&[self.list_key(channel)]).await?;
         Ok(())
     }
 

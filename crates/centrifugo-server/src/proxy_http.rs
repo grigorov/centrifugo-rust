@@ -156,22 +156,26 @@ struct ConnectResult {
     #[serde(default)]
     b64info: Option<String>,
     #[serde(default)]
+    data: Option<Box<RawValue>>,
+    #[serde(default)]
+    b64data: Option<String>,
+    #[serde(default)]
     channels: Vec<String>,
 }
 
 #[async_trait]
 impl ConnectProxy for HttpConnectProxy {
     async fn connect(&self, req: ProxyConnectRequest) -> anyhow::Result<ProxyConnectOutcome> {
-        let body = serde_json::json!({
-            "client": req.client,
-            "transport": req.transport,
-            "protocol": req.protocol,
-            "encoding": encoding(&req.protocol),
-        });
+        let mut body = Map::new();
+        body.insert("client".into(), req.client.into());
+        body.insert("transport".into(), req.transport.into());
+        body.insert("protocol".into(), req.protocol.clone().into());
+        body.insert("encoding".into(), encoding(&req.protocol).into());
+        put_data(&mut body, &req.data, &req.protocol);
         let resp: ConnectResponse = self
             .client
             .post(&self.endpoint)
-            .json(&body)
+            .json(&Value::Object(body))
             .send()
             .await?
             .error_for_status()?
@@ -195,6 +199,7 @@ impl ConnectProxy for HttpConnectProxy {
         Ok(ProxyConnectOutcome::Credentials(ProxyConnectReply {
             user: result.user,
             info: decode_gated(result.info, result.b64info, &req.protocol)?,
+            data: decode_gated(result.data, result.b64data, &req.protocol)?,
             expire_at: result.expire_at,
             channels: result.channels,
         }))
@@ -486,7 +491,7 @@ impl RpcProxy for HttpRpcProxy {
         }
         let r = resp.result.unwrap_or_default();
         Ok(ProxyOutcome::Result(RpcData {
-            data: decode_gated(r.data, r.b64data, &req.protocol)?,
+            data: decode_publish_data(r.data, r.b64data)?,
         }))
     }
 }

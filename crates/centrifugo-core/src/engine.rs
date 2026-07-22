@@ -17,6 +17,14 @@ use centrifugo_protocol::messages::{ClientInfo, Publication};
 
 use crate::node::StreamPosition;
 
+/// Node-wide metric counters snapshot, returned in the Info API's
+/// `NodeResult.metrics` (mirrors Go `Metrics{Interval, Items}`).
+#[derive(Clone, Default)]
+pub struct NodeMetrics {
+    pub interval: f64,
+    pub items: HashMap<String, f64>,
+}
+
 /// One node's published info (centrifuge `controlpb.Node`), shared across the
 /// cluster via NODE control pings and aggregated by the `info` API.
 #[derive(Clone, Default)]
@@ -28,6 +36,7 @@ pub struct NodeInfoData {
     pub num_users: u32,
     pub num_channels: u32,
     pub uptime: u32,
+    pub metrics: Option<NodeMetrics>,
 }
 
 /// A cross-node control command, broadcast to every node (server-side

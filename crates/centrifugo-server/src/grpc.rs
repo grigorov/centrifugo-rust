@@ -291,15 +291,21 @@ impl Centrifugo for GrpcApi {
             .node
             .info_nodes()
             .into_iter()
-            .map(|n| pb::NodeResult {
-                uid: n.uid,
-                name: n.name,
-                version: n.version,
-                num_clients: n.num_clients,
-                num_users: n.num_users,
-                num_channels: n.num_channels,
-                uptime: n.uptime,
-                metrics: None,
+            .map(|n| {
+                let metrics = n.metrics.as_ref().map(|m| pb::Metrics {
+                    interval: m.interval,
+                    items: m.items.clone(),
+                });
+                pb::NodeResult {
+                    uid: n.uid,
+                    name: n.name,
+                    version: n.version,
+                    num_clients: n.num_clients,
+                    num_users: n.num_users,
+                    num_channels: n.num_channels,
+                    uptime: n.uptime,
+                    metrics,
+                }
             })
             .collect();
         Ok(Response::new(pb::InfoResponse {
