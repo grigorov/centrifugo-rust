@@ -497,10 +497,12 @@ async fn dispatch(node: &Arc<Node>, cmd: ApiCommand) -> ApiReply {
                         num_users: n.num_users,
                         num_channels: n.num_channels,
                         uptime: n.uptime,
-                        metrics: n.metrics.map(|m| serde_json::json!({
-                            "interval": m.interval,
-                            "items": m.items,
-                        })),
+                        metrics: n.metrics.map(|m| {
+                            serde_json::json!({
+                                "interval": m.interval,
+                                "items": m.items,
+                            })
+                        }),
                     })
                     .collect(),
             },
