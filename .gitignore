@@ -1,18 +1,41 @@
-# Rust
-/target
-**/target
-Cargo.lock.orig
-*.rs.bk
+```
+# Rust/Cargo specific
+target/
+Cargo.lock
+**/*.rs.bk
 
-# Go oracle build artifacts (cloned source + built binary)
-/conformance/go-oracle/bin
-/conformance/go-oracle/src
-/conformance/go-oracle/centrifugo
-*.test
+# Dependencies
+vendor/
 
-# Env / local
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
 .env
-.DS_Store
+.env.local
+*.env.*
 
-# Scratch
-/scratch
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+**/build/
+**/dist/
+**/bin/
+**/lib/
+
+# Cache directories
+**/__pycache__/
+**/.mypy_cache/
+**/.pytest_cache/
+**/.gradle/
+**/node_modules/
+```

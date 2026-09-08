@@ -138,3 +138,110 @@ pub struct Proxies {
     pub publish: Option<Arc<dyn PublishProxy>>,
     pub rpc: Option<Arc<dyn RpcProxy>>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proxy_connect_outcome_variants() {
+        let reply = ProxyConnectReply {
+            user: "user123".to_string(),
+            info: Some(vec![1, 2, 3]),
+            data: None,
+            expire_at: 1234567890,
+            channels: vec!["channel1".to_string()],
+        };
+        let outcome = ProxyConnectOutcome::Credentials(reply);
+        assert!(matches!(outcome, ProxyConnectOutcome::Credentials(_)));
+
+        let outcome = ProxyConnectOutcome::Error {
+            code: 100,
+            message: "error".to_string(),
+        };
+        assert!(matches!(outcome, ProxyConnectOutcome::Error { .. }));
+
+        let outcome = ProxyConnectOutcome::Disconnect {
+            code: 3000,
+            reason: "reason".to_string(),
+        };
+        assert!(matches!(outcome, ProxyConnectOutcome::Disconnect { .. }));
+
+        let outcome = ProxyConnectOutcome::NoCredentials;
+        assert!(matches!(outcome, ProxyConnectOutcome::NoCredentials));
+    }
+
+    #[test]
+    fn proxy_outcome_variants() {
+        let outcome = ProxyOutcome::<PublishData>::Result(PublishData::default());
+        assert!(matches!(outcome, ProxyOutcome::Result(_)));
+
+        let outcome = ProxyOutcome::<PublishData>::Error {
+            code: 100,
+            message: "error".to_string(),
+        };
+        assert!(matches!(outcome, ProxyOutcome::Error { .. }));
+
+        let outcome = ProxyOutcome::<PublishData>::Disconnect {
+            code: 3000,
+            reason: "reason".to_string(),
+        };
+        assert!(matches!(outcome, ProxyOutcome::Disconnect { .. }));
+    }
+
+    #[test]
+    fn refresh_creds_default() {
+        let creds = RefreshCreds::default();
+        assert!(!creds.expired);
+        assert_eq!(creds.expire_at, 0);
+        assert!(creds.info.is_none());
+    }
+
+    #[test]
+    fn subscribe_creds_default() {
+        let creds = SubscribeCreds::default();
+        assert!(creds.info.is_none());
+    }
+
+    #[test]
+    fn publish_data_default() {
+        let data = PublishData::default();
+        assert!(data.data.is_none());
+    }
+
+    #[test]
+    fn rpc_data_default() {
+        let data = RpcData::default();
+        assert!(data.data.is_none());
+    }
+
+    #[test]
+    fn proxy_request_default() {
+        let req = ProxyRequest::default();
+        assert_eq!(req.client, "");
+        assert_eq!(req.user, "");
+        assert_eq!(req.transport, "");
+        assert_eq!(req.protocol, "");
+        assert_eq!(req.channel, "");
+        assert_eq!(req.method, "");
+        assert!(req.data.is_none());
+        assert_eq!(req.token, "");
+    }
+
+    #[test]
+    fn proxies_default_is_none() {
+        let proxies = Proxies::default();
+        assert!(proxies.connect.is_none());
+        assert!(proxies.refresh.is_none());
+        assert!(proxies.subscribe.is_none());
+        assert!(proxies.publish.is_none());
+        assert!(proxies.rpc.is_none());
+    }
+
+    #[test]
+    fn proxies_clone() {
+        let proxies = Proxies::default();
+        let cloned = proxies.clone();
+        assert!(cloned.connect.is_none());
+    }
+}
